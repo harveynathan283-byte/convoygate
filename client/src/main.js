@@ -1,12 +1,8 @@
-import { app, BrowserWindow, ipcMain } from "electron";
-import path from "node:path";
-import os from "node:os";
-import fs from "node:fs";
-import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const { app, BrowserWindow, ipcMain } = require("electron");
+const path = require("node:path");
+const os = require("node:os");
+const fs = require("node:fs");
+const crypto = require("node:crypto");
 
 let mainWindow;
 
