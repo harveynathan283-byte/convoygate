@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ConvoyGate Launcher</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: #0b0f19; color: #f1f5f9; padding: 32px; user-select: none; }
+    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 20px; }
+    h1 { font-size: 20px; font-weight: 700; color: #38bdf8; }
+    .badge { background: #1e293b; color: #94a3b8; font-size: 11px; padding: 6px 12px; border-radius: 6px; font-family: monospace; }
+    .card { background: #131c2e; border: 1px solid #1e293b; border-radius: 10px; padding: 20px; margin-top: 20px; }
+    label { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #64748b; display: block; margin-bottom: 6px; }
+    input { width: 100%; background: #0b0f19; border: 1px solid #334155; color: #fff; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px; outline: none; }
+    input:focus { border-color: #38bdf8; }
+    .btn { background: #0284c7; color: #fff; border: none; padding: 12px; border-radius: 6px; font-weight: 600; font-size: 13px; width: 100%; cursor: pointer; transition: 0.2s; }
+    .btn:hover { background: #0369a1; }
+    .btn:disabled { background: #334155; cursor: not-allowed; }
+    #log { margin-top: 20px; font-family: monospace; font-size: 12px; line-height: 1.6; padding: 16px; border-radius: 8px; background: #060911; border: 1px solid #1e293b; color: #38bdf8; height: 160px; overflow-y: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>ConvoyGate Launcher</h1>
+    <div class="badge" id="hwidBadge">DETECTING HWID...</div>
+  </div>
+
+  <div class="card">
+    <label>Server URL</label>
+    <input type="text" id="serverUrl" value="http://localhost:3000">
+
+    <label>Discord Account ID</label>
+    <input type="text" id="discordId" placeholder="e.g. 84920491823901923">
+
+    <label>Target Mod Package</label>
+    <input type="text" id="modId" value="w900_custom_rig">
+
+    <button class="btn" id="syncBtn" onclick="runSync()">Sync Mod & Verify 30-Day Lease</button>
+  </div>
+
+  <div id="log">ConvoyGate Client Ready.</div>
+
+  <script>
+    const { ipcRenderer } = require("electron");
+
+    async function init() {
+      const info = await ipcRenderer.invoke("get-system-info");
+      document.getElementById("hwidBadge").innerText = "HWID: " + info.hwid.substring(0, 16) + "...";
+    }
+
+    async function runSync() {
+      const logBox = document.getElementById("log");
+      const syncBtn = document.getElementById("syncBtn");
+      const serverUrl = document.getElementById("serverUrl").value.trim();
+      const discordId = document.getElementById("discordId").value.trim();
+      const modId = document.getElementById("modId").value.trim();
+
+      if (!discordId) {
+        logBox.innerText = "[Error] Please provide your Discord User ID.";
+        return;
+      }
+
+      syncBtn.disabled = true;
+      logBox.innerText = "[ConvoyGate] Contacting authority server at " + serverUrl + "...\n";
+
+      try {
+        const result = await ipcRenderer.invoke("sync-mod", { serverUrl, discordId, modId });
+        logBox.innerText = "[ConvoyGate] SUCCESS: Mod files and license active!\n\n" +
+          "• Lease Key Installed:\n  " + result.keyPath + "\n\n" +
+          "• Encrypted Mod Installed:\n  " + result.modPath + "\n\n" +
+          "Launch American Truck Simulator to play.";
+      } catch (err) {
+        logBox.innerText = "[ConvoyGate] ERROR: " + err.message;
+      } finally {
+        syncBtn.disabled = false;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

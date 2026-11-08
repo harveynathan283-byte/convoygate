@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment & Credentials
+.env
+*.key
+backend/keys/
+
+# Database & Runtime Data
+*.db
+*.db-journal
+backend/storage/dist/
+packer/extracted_test/
+
+# Build Artefacts
+build/
+dist/
+release-suite/
+*.scs

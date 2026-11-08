@@ -1,0 +1,58 @@
+name: Build All ConvoyGate Windows Binaries
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-all-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (v20 LTS for Windows builds)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 1. Compile C++ Game Plugin (convoygate.dll)
+      - name: Setup MSVC Compiler
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build C++ DLL
+        run: |
+          cmake -B build -S plugin -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+
+      # 2. Compile Standalone Mod Packer (.exe)
+      - name: Build Standalone Packer Executable
+        run: |
+          cd packer
+          npm install
+          npm install -g @yao-pkg/pkg esbuild
+          npx esbuild src/cli.ts --bundle --platform=node --target=node20 --outfile=dist/packer.cjs
+          pkg dist/packer.cjs --targets node20-win-x64 --output dist/ConvoyGate-Packer.exe
+
+      # 3. Compile Subscriber Desktop Launcher (.exe)
+      - name: Build Desktop Launcher Executable
+        run: |
+          cd client
+          npm install
+          npx electron-builder --win --x64
+
+      # 4. Upload All Binaries as an Artifact Suite
+      - name: Package Release Suite
+        run: |
+          mkdir release-suite
+          copy build\Release\convoygate.dll release-suite\
+          copy packer\dist\ConvoyGate-Packer.exe release-suite\
+          copy client\dist\ConvoyGate-Launcher-Setup*.exe release-suite\
+
+      - name: Upload Windows Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConvoyGate-Windows-Suite
+          path: release-suite/*
