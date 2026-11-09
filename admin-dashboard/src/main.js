@@ -2,13 +2,30 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const zlib = require("zlib");
 const axios = require("axios");
 const FormData = require("form-data");
 const AdmZip = require("adm-zip");
 
 let mainWindow;
 const SERVER_URL = "http://192.168.86.111:3000";
+
+// IEEE 802.3 CRC32 Implementation (Compatible with all Node / Electron versions)
+const CRC_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i >>> 0;
+  for (let k = 0; k < 8; k++) {
+    c = (c & 1) ? ((0xEDB88320 ^ (c >>> 1)) >>> 0) : (c >>> 1);
+  }
+  CRC_TABLE[i] = c >>> 0;
+}
+
+function calculateCrc32(buf) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -60,7 +77,7 @@ function lockDirectoryToScs(sourceFolder, outputPath) {
     const item = files[i];
     const fileBuf = fs.readFileSync(item.full);
     const nameBuf = Buffer.from(item.rel, "utf8");
-    const crc = zlib.crc32(fileBuf);
+    const crc = calculateCrc32(fileBuf);
     const size = fileBuf.length;
 
     // Local Header (Store mode for native ATS engine streaming)
@@ -133,7 +150,7 @@ function lockDirectoryToScs(sourceFolder, outputPath) {
   fs.closeSync(outFd);
 }
 
-// 1. Native Windows Browse Dialogs
+// Native Windows Browse Dialogs
 ipcMain.handle("dialog-select-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Select Uncompressed Mod Folder",
@@ -153,7 +170,7 @@ ipcMain.handle("dialog-select-file", async () => {
   return result.filePaths[0];
 });
 
-// 2. Process Mod (Folder, .zip, or .scs) and Stream to Server
+// Process Mod (Folder, .zip, or .scs) and Stream to Server
 ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, version, tier, directUpload }) => {
   let tempExtractDir = null;
   let finalScsFile = null;
@@ -162,13 +179,11 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
     const stat = fs.statSync(inputPath);
 
     if (directUpload && stat.isFile() && inputPath.toLowerCase().endsWith(".scs")) {
-      // Direct upload of pre-locked .scs file
       finalScsFile = inputPath;
     } else {
       let folderToPack = inputPath;
 
       if (stat.isFile()) {
-        // Extract .zip or uncompressed .scs to a temporary directory first
         tempExtractDir = path.join(os.tmpdir(), `cg_extract_${Date.now()}`);
         fs.mkdirSync(tempExtractDir, { recursive: true });
 
@@ -177,12 +192,10 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
         folderToPack = tempExtractDir;
       }
 
-      // Pack and lock to destination .scs
       finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
       lockDirectoryToScs(folderToPack, finalScsFile);
     }
 
-    // Stream to backend
     const form = new FormData();
     form.append("modId", modId);
     form.append("name", name);
@@ -196,7 +209,6 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
       maxBodyLength: Infinity,
     });
 
-    // Cleanup temporary files
     if (tempExtractDir && fs.existsSync(tempExtractDir)) {
       fs.rmSync(tempExtractDir, { recursive: true, force: true });
     }
@@ -213,7 +225,6 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
   }
 });
 
-// 3. Fetch Mod Catalog
 ipcMain.handle("fetch-catalog", async () => {
   try {
     const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 4000 });
@@ -223,7 +234,6 @@ ipcMain.handle("fetch-catalog", async () => {
   }
 });
 
-// 4. Delete Mod from Cloud
 ipcMain.handle("delete-mod", async (event, modId) => {
   try {
     const res = await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${modId}`);
