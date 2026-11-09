@@ -13,7 +13,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Automatically sets up the MSVC compiler on any Windows runner
       - name: Setup MSVC Developer Environment
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -22,10 +21,10 @@ jobs:
         with:
           node-version: 20
 
-      # 1. Compile C++ Plugin directly into 64-bit convoygate.dll
+      # 1. Compile C++ Plugin with memory hook libraries
       - name: Compile ATS Plugin DLL
         run: |
-          cl /LD /O2 /EHsc plugin/convoygate_plugin.cpp /Fe:convoygate.dll /link advapi32.lib bcrypt.lib crypt32.lib user32.lib
+          cl /LD /O2 /EHsc plugin/convoygate_plugin.cpp /Fe:convoygate.dll /link advapi32.lib bcrypt.lib crypt32.lib user32.lib imagehlp.lib
 
       # 2. Build Admin Dashboard GUI (.exe)
       - name: Build Admin Dashboard GUI
@@ -41,13 +40,8 @@ jobs:
           npm install
           npm run dist
 
-      # 4. Copy DLL into dist for distribution
-      - name: Stage Artifacts
-        run: |
-          cp convoygate.dll client/dist/
-
-      # 5. Upload Complete Windows Suite (Admin EXE, Launcher EXE & convoygate.dll)
-      - name: Upload GUI Suite & DLL
+      # 4. Upload Complete Suite
+      - name: Upload Complete Suite
         uses: actions/upload-artifact@v4
         with:
           name: ConvoyGate-GUI-Suite

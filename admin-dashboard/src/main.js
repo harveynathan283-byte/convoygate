@@ -10,6 +10,12 @@ const axios = require("axios");
 let mainWindow;
 const SERVER_URL = "http://192.168.86.111:3000";
 
+// ConvoyGate Static Master Cypher Seed
+const DRM_CIPHER_KEY = Buffer.from([
+  0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61, // "ConvoyGa"
+  0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65  // "teSecure"
+]);
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1060,
@@ -29,27 +35,15 @@ function createWindow() {
 
 app.whenReady().then(createWindow);
 
-// Fast CRC32 Table
-const CRC_TABLE = new Uint32Array(256);
-for (let i = 0; i < 256; i++) {
-  let c = i >>> 0;
-  for (let k = 0; k < 8; k++) {
-    c = (c & 1) ? ((0xEDB88320 ^ (c >>> 1)) >>> 0) : (c >>> 1);
+// Encrypt a buffer in place with stream cipher
+function encryptPayload(buffer) {
+  for (let i = 0; i < buffer.length; i++) {
+    buffer[i] ^= DRM_CIPHER_KEY[i % DRM_CIPHER_KEY.length] ^ (i & 0xFF);
   }
-  CRC_TABLE[i] = c >>> 0;
 }
 
-function calculateCrc32(buf) {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < buf.length; i++) {
-    crc = CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-
-// Scrambles BOTH Central Directory AND Local File Headers
-// Makes WinRAR, 7-Zip, and Windows Explorer fail while ATS mounts natively
-function lockArchiveCompletely(inputPath, outputPath, onProgress) {
+// Scramble an existing SCS/ZIP archive's contents AND headers
+function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
   fs.copyFileSync(inputPath, outputPath);
 
   const fd = fs.openSync(outputPath, "r+");
@@ -70,7 +64,7 @@ function lockArchiveCompletely(inputPath, outputPath, onProgress) {
 
   if (eocdOffsetInBuf === -1) {
     fs.closeSync(fd);
-    throw new Error("File is not a valid SCS or ZIP archive (missing EOCD).");
+    throw new Error("Invalid archive: missing EOCD.");
   }
 
   const cdSize = searchBuf.readUInt32LE(eocdOffsetInBuf + 12);
@@ -85,44 +79,64 @@ function lockArchiveCompletely(inputPath, outputPath, onProgress) {
   while (pos < cdSize) {
     if (cdBuf.readUInt32LE(pos) !== 0x02014b50) break;
 
-    // 1. Scramble Central Directory Entry
-    cdBuf.writeUInt16LE(99, pos + 6);          // Version needed: 9.9
-    const flags = cdBuf.readUInt16LE(pos + 8);
-    cdBuf.writeUInt16LE(flags | 0x0001, pos + 8); // Bit 0: Encrypted flag
-    cdBuf.writeUInt32LE(0xDEADBEEF, pos + 16);   // Scrambled CRC32
-
-    // 2. Locate and Scramble the Matching Local File Header (LFH)
-    const lfhOffset = cdBuf.readUInt32LE(pos + 42);
-    const lfhCheck = Buffer.alloc(4);
-    fs.readSync(fd, lfhCheck, 0, 4, lfhOffset);
-
-    if (lfhCheck.readUInt32LE(0) === 0x04034b50) {
-      const lfhPatch = Buffer.alloc(26);
-      fs.readSync(fd, lfhPatch, 0, 26, lfhOffset + 4);
-
-      lfhPatch.writeUInt16LE(99, 0);                 // LFH Version: 9.9
-      lfhPatch.writeUInt16LE(flags | 0x0001, 2);     // LFH Flag: Encrypted
-      lfhPatch.writeUInt32LE(0xDEADBEEF, 10);        // LFH CRC32: Scrambled
-
-      fs.writeSync(fd, lfhPatch, 0, 26, lfhOffset + 4);
-    }
-
     const nameLen = cdBuf.readUInt16LE(pos + 28);
     const extraLen = cdBuf.readUInt16LE(pos + 30);
     const commentLen = cdBuf.readUInt16LE(pos + 32);
+    const lfhOffset = cdBuf.readUInt32LE(pos + 42);
+
+    // Read filename
+    const nameBuf = Buffer.alloc(nameLen);
+    fs.readSync(fd, nameBuf, 0, nameLen, cdOffset + pos + 46);
+    const fileName = nameBuf.toString("utf8");
+
+    // Don't encrypt manifest.sii or icon so Mod Manager can show name/icon
+    const isMetadata = fileName.toLowerCase().includes("manifest.sii") || 
+                       fileName.toLowerCase().includes("mod_icon.jpg") ||
+                       fileName.toLowerCase().includes("description.txt");
+
+    // 1. Scramble Central Directory
+    cdBuf.writeUInt16LE(99, pos + 6); // Version 9.9
+    const flags = cdBuf.readUInt16LE(pos + 8);
+    cdBuf.writeUInt16LE(flags | 0x0001, pos + 8); // Encrypted bit
+
+    // 2. Read LFH and encrypt actual asset data
+    const lfhHeader = Buffer.alloc(30);
+    fs.readSync(fd, lfhHeader, 0, 30, lfhOffset);
+
+    if (lfhHeader.readUInt32LE(0) === 0x04034b50) {
+      const lfhNameLen = lfhHeader.readUInt16LE(26);
+      const lfhExtraLen = lfhHeader.readUInt16LE(28);
+      const compressedSize = lfhHeader.readUInt32LE(18);
+      const dataOffset = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
+
+      if (!isMetadata && compressedSize > 0) {
+        // Read the real asset bytes, encrypt them, write them back!
+        const payloadBuf = Buffer.alloc(compressedSize);
+        fs.readSync(fd, payloadBuf, 0, compressedSize, dataOffset);
+
+        encryptPayload(payloadBuf);
+
+        fs.writeSync(fd, payloadBuf, 0, compressedSize, dataOffset);
+      }
+
+      // Mark LFH header
+      lfhHeader.writeUInt16LE(99, 4);
+      lfhHeader.writeUInt16LE(flags | 0x0001, 6);
+      fs.writeSync(fd, lfhHeader, 0, 30, lfhOffset);
+    }
+
     pos += 46 + nameLen + extraLen + commentLen;
     fileCount++;
 
-    if (onProgress && fileCount % 150 === 0) {
-      onProgress(fileCount);
-    }
+    if (onProgress && fileCount % 100 === 0) onProgress(fileCount);
   }
 
-  // Write modified Central Directory back to disk
+  // Write patched CD
   fs.writeSync(fd, cdBuf, 0, cdSize, cdOffset);
   fs.closeSync(fd);
 }
 
+// Low-level recursive folder scanner
 function getAllFiles(dir, base = "") {
   let results = [];
   const list = fs.readdirSync(dir, { withFileTypes: true });
@@ -138,7 +152,8 @@ function getAllFiles(dir, base = "") {
   return results;
 }
 
-function packFolderToScs(sourceFolder, outputPath, onProgress) {
+// Pack folder with encrypted payload bytes
+function packFolderEncrypted(sourceFolder, outputPath, onProgress) {
   const files = getAllFiles(sourceFolder);
   if (files.length === 0) throw new Error("Folder contains no mod assets.");
 
@@ -148,13 +163,19 @@ function packFolderToScs(sourceFolder, outputPath, onProgress) {
 
   for (let i = 0; i < files.length; i++) {
     const item = files[i];
-    const fileBuf = fs.readFileSync(item.full);
+    let fileBuf = fs.readFileSync(item.full);
     const nameBuf = Buffer.from(item.rel, "utf8");
-    const size = fileBuf.length;
+    const isMetadata = item.rel.toLowerCase().includes("manifest.sii") || 
+                       item.rel.toLowerCase().includes("mod_icon.jpg") ||
+                       item.rel.toLowerCase().includes("description.txt");
 
+    if (!isMetadata) {
+      encryptPayload(fileBuf);
+    }
+
+    const size = fileBuf.length;
     if (onProgress && i % 100 === 0) onProgress(i + 1, files.length);
 
-    // LFH: Version 9.9, encrypted bit set, scrambled CRC
     const lfh = Buffer.alloc(30);
     lfh.writeUInt32LE(0x04034b50, 0);
     lfh.writeUInt16LE(99, 4);
@@ -288,7 +309,6 @@ ipcMain.handle("dialog-select-file", async () => {
   return result.filePaths[0];
 });
 
-// Enforces full archive obfuscation on EVERY file (no bypass)
 ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, version, tier }) => {
   let finalScsFile = null;
 
@@ -297,14 +317,14 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
     finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
 
     if (stat.isFile()) {
-      event.sender.send("publish-status", { message: "Scrambling archive headers & encrypting bit flags...", percent: 0 });
-      lockArchiveCompletely(inputPath, finalScsFile, (count) => {
-        event.sender.send("publish-status", { message: `Scrambling file headers: ${count} items locked...` });
+      event.sender.send("publish-status", { message: "Encrypting 3D assets & obfuscating headers...", percent: 0 });
+      encryptAndLockScsArchive(inputPath, finalScsFile, (count) => {
+        event.sender.send("publish-status", { message: `Encrypting assets: ${count} items secured...` });
       });
     } else {
-      event.sender.send("publish-status", { message: "Packing folder into protected SCS archive...", percent: 0 });
-      packFolderToScs(inputPath, finalScsFile, (current, total) => {
-        event.sender.send("publish-status", { message: `Packing & locking: ${current} / ${total} files...` });
+      event.sender.send("publish-status", { message: "Compiling folder into encrypted SCS archive...", percent: 0 });
+      packFolderEncrypted(inputPath, finalScsFile, (current, total) => {
+        event.sender.send("publish-status", { message: `Encrypting & packing: ${current} / ${total} files...` });
       });
     }
 
