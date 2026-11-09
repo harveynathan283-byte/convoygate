@@ -18,25 +18,38 @@ jobs:
         with:
           node-version: 20
 
-      # 1. Build the Admin GUI Dashboard (.exe)
+      # 1. Compile C++ Plugin to convoygate.dll using MSVC
+      - name: Compile ATS Plugin DLL
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cl /LD /O2 plugin/convoygate_plugin.cpp /Fe:convoygate.dll
+
+      # 2. Build Admin GUI Dashboard (.exe)
       - name: Build Admin Dashboard GUI
         run: |
           cd admin-dashboard
           npm install
           npm run dist
 
-      # 2. Build the Client Launcher (.exe)
+      # 3. Build Client Launcher GUI (.exe)
       - name: Build Client Launcher GUI
         run: |
           cd client
           npm install
           npm run dist
 
-      # 3. Package both graphical apps together
-      - name: Upload Both GUI Apps
+      # 4. Copy convoygate.dll into dist folder for packaging
+      - name: Stage Artifacts
+        run: |
+          cp convoygate.dll client/dist/
+
+      # 5. Upload Complete Windows Suite (Admin, Launcher & DLL)
+      - name: Upload GUI Suite & DLL
         uses: actions/upload-artifact@v4
         with:
           name: ConvoyGate-GUI-Suite
           path: |
             admin-dashboard/dist/*.exe
             client/dist/*.exe
+            convoygate.dll
