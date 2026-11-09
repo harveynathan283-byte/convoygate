@@ -21,10 +21,12 @@ jobs:
         with:
           node-version: 20
 
-      # 1. Compile C++ Plugin to convoygate.dll (Standard Win32 API)
+      # 1. Compile C++ Plugin directly into client and admin folders
       - name: Compile ATS Plugin DLL
         run: |
-          cl /LD /O2 /EHsc plugin/convoygate_plugin.cpp /Fe:convoygate.dll /link advapi32.lib crypt32.lib user32.lib
+          cl /LD /O2 /EHsc plugin/convoygate_plugin.cpp /Fe:client/convoygate.dll /link advapi32.lib crypt32.lib user32.lib
+          copy client\convoygate.dll convoygate.dll
+        shell: cmd
 
       # 2. Build Admin Dashboard GUI (.exe)
       - name: Build Admin Dashboard GUI
@@ -32,6 +34,7 @@ jobs:
           cd admin-dashboard
           npm install
           npm run dist
+        shell: bash
 
       # 3. Build Client Launcher GUI (.exe)
       - name: Build Client Launcher GUI
@@ -39,8 +42,9 @@ jobs:
           cd client
           npm install
           npm run dist
+        shell: bash
 
-      # 4. Upload Complete Suite
+      # 4. Upload Complete Executable Suite
       - name: Upload Complete Suite
         uses: actions/upload-artifact@v4
         with:
