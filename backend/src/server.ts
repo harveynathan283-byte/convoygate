@@ -4,13 +4,12 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
-import multer from "multer";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
-// Middleware
-app.use(cors());
+// Enable CORS and JSON parsing
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -23,12 +22,6 @@ const KEYS_DIR = path.join(STORAGE_DIR, "keys");
 fs.mkdirSync(DIST_DIR, { recursive: true });
 fs.mkdirSync(TEMP_DIR, { recursive: true });
 fs.mkdirSync(KEYS_DIR, { recursive: true });
-
-// Multer Storage Configuration (Handles up to 10 GB mod files)
-const upload = multer({
-  dest: TEMP_DIR,
-  limits: { fileSize: 10 * 1024 * 1024 * 1024 },
-});
 
 // Database Initialization
 const db = new Database(path.join(STORAGE_DIR, "convoygate.db"));
@@ -82,10 +75,8 @@ if (fs.existsSync(privateKeyPath) && fs.existsSync(publicKeyPath)) {
 }
 
 // ---------------------------------------------------------------------------
-// API Routes: Licensing
+// API: Licensing
 // ---------------------------------------------------------------------------
-
-// Issues signed 30-day hardware leases to client launcher
 app.post("/api/v1/license/lease", (req: Request, res: Response) => {
   try {
     const { discordId, hwid, modId } = req.body;
@@ -99,7 +90,7 @@ app.post("/api/v1/license/lease", (req: Request, res: Response) => {
       : "usr_guest_subscriber";
 
     const now = Math.floor(Date.now() / 1000);
-    const expiresAt = now + (30 * 24 * 60 * 60); // 30-day lease expiration
+    const expiresAt = now + (30 * 24 * 60 * 60);
 
     const payload = {
       userId,
@@ -115,7 +106,6 @@ app.post("/api/v1/license/lease", (req: Request, res: Response) => {
     const signatureBuffer = crypto.sign(null, Buffer.from(dataBase64), privateKey);
     const signatureBase64 = signatureBuffer.toString("base64");
 
-    // Track active lease in database
     const leaseId = crypto.randomUUID();
     db.prepare(`
       INSERT INTO leases (id, user_id, hwid, mod_id, issued_at, expires_at)
@@ -138,10 +128,8 @@ app.post("/api/v1/license/lease", (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// API Routes: Mod Catalog & Distribution
+// API: Mod Catalog & Distribution
 // ---------------------------------------------------------------------------
-
-// Returns all uploaded mods to Launcher and Admin Panel
 app.get("/api/v1/mods", (_req: Request, res: Response) => {
   try {
     const mods = db.prepare("SELECT * FROM mods ORDER BY name ASC").all();
@@ -151,56 +139,67 @@ app.get("/api/v1/mods", (_req: Request, res: Response) => {
   }
 });
 
-// Admin upload route: saves locked .scs and registers it in database
-app.post("/api/v1/admin/upload", upload.single("file"), (req: Request, res: Response) => {
-  try {
-    const { modId, name, version, tier } = req.body;
+// High-speed direct binary upload endpoint (Impervious to ECONNRESET)
+app.post("/api/v1/admin/upload-stream", (req: Request, res: Response) => {
+  const modId = decodeURIComponent((req.headers["x-mod-id"] as string) || (req.query.modId as string) || "");
+  const name = decodeURIComponent((req.headers["x-mod-name"] as string) || (req.query.name as string) || modId);
+  const version = decodeURIComponent((req.headers["x-mod-version"] as string) || (req.query.version as string) || "1.0.0");
+  const tier = decodeURIComponent((req.headers["x-mod-tier"] as string) || (req.query.tier as string) || "All");
 
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: "No mod file received." });
-    }
-
-    if (!modId) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ success: false, error: "Missing modId parameter." });
-    }
-
-    const finalPath = path.join(DIST_DIR, `${modId}.scs`);
-
-    // Move uploaded file from temp to distribution directory
-    if (fs.existsSync(finalPath)) {
-      fs.unlinkSync(finalPath);
-    }
-    fs.renameSync(req.file.path, finalPath);
-
-    const fileSize = fs.statSync(finalPath).size;
-    const updatedAt = Math.floor(Date.now() / 1000);
-
-    const stmt = db.prepare(`
-      INSERT INTO mods (id, name, version, tier, file_size, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        version = excluded.version,
-        tier = excluded.tier,
-        file_size = excluded.file_size,
-        updated_at = excluded.updated_at
-    `);
-
-    stmt.run(modId, name || modId, version || "1.0.0", tier || "All", fileSize, updatedAt);
-
-    console.log(`[Admin] Mod registered: ${name} (${modId}) - ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
-    return res.json({ success: true, modId, fileSize });
-  } catch (err: any) {
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    console.error("[Upload Error]:", err);
-    return res.status(500).json({ success: false, error: err.message });
+  if (!modId) {
+    return res.status(400).json({ success: false, error: "Missing x-mod-id header." });
   }
+
+  const finalPath = path.join(DIST_DIR, `${modId}.scs`);
+  const tempPath = path.join(TEMP_DIR, `${Date.now()}_${modId}.scs`);
+  const writeStream = fs.createWriteStream(tempPath);
+
+  req.pipe(writeStream);
+
+  writeStream.on("finish", () => {
+    try {
+      if (fs.existsSync(finalPath)) {
+        fs.unlinkSync(finalPath);
+      }
+      fs.renameSync(tempPath, finalPath);
+
+      const fileSize = fs.statSync(finalPath).size;
+      const updatedAt = Math.floor(Date.now() / 1000);
+
+      const stmt = db.prepare(`
+        INSERT INTO mods (id, name, version, tier, file_size, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          version = excluded.version,
+          tier = excluded.tier,
+          file_size = excluded.file_size,
+          updated_at = excluded.updated_at
+      `);
+
+      stmt.run(modId, name, version, tier, fileSize, updatedAt);
+
+      console.log(`[Admin] Mod saved to catalog: ${name} (${modId}) - ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
+      return res.json({ success: true, modId, fileSize });
+    } catch (err: any) {
+      console.error("[Save Error]:", err);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  writeStream.on("error", (err) => {
+    console.error("[Write Stream Error]:", err);
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    return res.status(500).json({ success: false, error: err.message });
+  });
+
+  req.on("error", (err) => {
+    console.error("[Upload Network Error]:", err);
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    return res.status(500).json({ success: false, error: err.message });
+  });
 });
 
-// Admin delete route: removes mod from DB and deletes .scs from disk
 app.delete("/api/v1/admin/mods/:id", (req: Request, res: Response) => {
   try {
     const modId = req.params.id;
@@ -219,7 +218,6 @@ app.delete("/api/v1/admin/mods/:id", (req: Request, res: Response) => {
   }
 });
 
-// Client download endpoint: streams locked .scs to launcher
 app.get("/api/v1/client/download/:modId", (req: Request, res: Response) => {
   try {
     const modId = req.params.modId;
@@ -243,83 +241,14 @@ app.get("/api/v1/client/download/:modId", (req: Request, res: Response) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Server Command Center Web Dashboard
-// ---------------------------------------------------------------------------
-app.get("/", (_req: Request, res: Response) => {
-  const mods = db.prepare("SELECT * FROM mods ORDER BY name ASC").all();
-  const leaseCount = (db.prepare("SELECT COUNT(*) as count FROM leases").get() as any).count;
-
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>ConvoyGate Command Center</title>
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f111a; color: #fff; padding: 40px; margin: 0; }
-        .container { max-width: 1000px; margin: 0 auto; }
-        h1 { color: #8a2be2; margin-bottom: 5px; }
-        .sub { color: #888; margin-bottom: 30px; }
-        .stats { display: flex; gap: 20px; margin-bottom: 30px; }
-        .card { background: #1a1d2e; border: 1px solid #2a2e45; border-radius: 8px; padding: 20px; flex: 1; }
-        .card h3 { margin: 0 0 10px 0; color: #aaa; font-size: 0.9em; text-transform: uppercase; }
-        .card p { margin: 0; font-size: 2em; font-weight: bold; color: #00e676; }
-        table { width: 100%; border-collapse: collapse; background: #1a1d2e; border-radius: 8px; overflow: hidden; }
-        th, td { padding: 14px 18px; text-align: left; border-bottom: 1px solid #2a2e45; }
-        th { background: #22263d; color: #aaa; font-size: 0.85em; text-transform: uppercase; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>ConvoyGate Cloud Master</h1>
-        <p class="sub">Central Distribution & DRM Licensing Authority</p>
-
-        <div class="stats">
-          <div class="card">
-            <h3>Active Catalog Mods</h3>
-            <p>${mods.length}</p>
-          </div>
-          <div class="card">
-            <h3>Active Leases Issued</h3>
-            <p>${leaseCount}</p>
-          </div>
-        </div>
-
-        <h2>Uploaded Mod Catalog</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Version</th>
-              <th>Tier</th>
-              <th>File Size</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${mods.map((m: any) => `
-              <tr>
-                <td><code>${m.id}</code></td>
-                <td><strong>${m.name}</strong></td>
-                <td>${m.version}</td>
-                <td>${m.tier}</td>
-                <td>${(m.file_size / 1024 / 1024).toFixed(2)} MB</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
-    </body>
-    </html>
-  `;
-  res.send(html);
-});
-
-// Start Server
-app.listen(PORT, () => {
+// Bind to 0.0.0.0 and disable socket timeouts so large transfers never disconnect
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`\n==================================================`);
   console.log(` ConvoyGate Command Center running on port: ${PORT}`);
-  console.log(` Health URL: http://localhost:${PORT}/api/v1/mods`);
-  console.log(` Dashboard:  http://localhost:${PORT}/`);
+  console.log(` Windows Client Access: http://192.168.86.111:${PORT}`);
   console.log(`==================================================\n`);
 });
+
+server.timeout = 0;
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 125000;

@@ -23,12 +23,20 @@
     }
     h1 { margin: 0; color: #9d4edd; font-size: 1.6rem; }
     .badge {
-      background: #240046;
-      color: #c77dff;
       padding: 5px 12px;
       border-radius: 16px;
       font-size: 0.8rem;
-      border: 1px solid #5a189a;
+      font-weight: 600;
+    }
+    .badge.connected {
+      background: #0d2818;
+      color: #52b788;
+      border: 1px solid #1b4332;
+    }
+    .badge.disconnected {
+      background: #3b181f;
+      color: #f87171;
+      border: 1px solid #771d2d;
     }
     .drop-zone {
       border: 2px dashed #5a189a;
@@ -64,25 +72,42 @@
     .btn-primary { background: #7b2cbf; color: #fff; }
     .btn-secondary { background: #242940; color: #cbd5e1; border: 1px solid #333a56; }
     .btn-danger { background: #e63946; color: #fff; }
-    .status-box {
+    
+    .status-container {
       display: none;
-      padding: 12px 16px;
-      border-radius: 6px;
-      margin-bottom: 20px;
-      font-size: 0.9rem;
-    }
-    .status-box.active {
-      display: block;
       background: #162a21;
-      color: #4ade80;
       border: 1px solid #1f5139;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
     }
-    .status-box.error {
-      display: block;
+    .status-container.error {
       background: #38151b;
-      color: #f87171;
-      border: 1px solid #631d27;
+      border-color: #631d27;
     }
+    .status-text {
+      color: #4ade80;
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+    }
+    .status-container.error .status-text {
+      color: #f87171;
+    }
+    .progress-bar-bg {
+      display: none;
+      width: 100%;
+      height: 8px;
+      background: #0f111a;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: #9d4edd;
+      transition: width 0.15s ease;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -158,7 +183,7 @@
       <h1>ConvoyGate Admin Publisher</h1>
       <small style="color: #64748b;">Lock assets & sync live with subscribers</small>
     </div>
-    <div class="badge">Backend: 192.168.86.111</div>
+    <div id="connBadge" class="badge disconnected">Checking Server...</div>
   </div>
 
   <div class="drop-zone" id="dropZone">
@@ -172,7 +197,12 @@
     <button class="btn btn-secondary" style="margin-left: auto;" onclick="loadCatalog()">🔄 Refresh Catalog</button>
   </div>
 
-  <div id="statusBox" class="status-box"></div>
+  <div id="statusContainer" class="status-container">
+    <div id="statusText" class="status-text"></div>
+    <div id="progressBarBg" class="progress-bar-bg">
+      <div id="progressBarFill" class="progress-bar-fill"></div>
+    </div>
+  </div>
 
   <h2 style="font-size: 1.1rem; margin: 15px 0 10px 0; color: #cbd5e1;">Live Cloud Catalog</h2>
   <table>
@@ -239,15 +269,17 @@
     const { ipcRenderer } = require("electron");
     const path = require("path");
 
-    // Prevent default window drag/drop behavior that blocks drops
     window.addEventListener("dragover", (e) => e.preventDefault());
     window.addEventListener("drop", (e) => e.preventDefault());
 
     const dropZone = document.getElementById("dropZone");
-    const statusBox = document.getElementById("statusBox");
+    const statusContainer = document.getElementById("statusContainer");
+    const statusText = document.getElementById("statusText");
+    const progressBarBg = document.getElementById("progressBarBg");
+    const progressBarFill = document.getElementById("progressBarFill");
     const catalogTable = document.getElementById("catalogTable");
+    const connBadge = document.getElementById("connBadge");
 
-    // Modal elements
     const uploadModal = document.getElementById("uploadModal");
     const modalSourcePath = document.getElementById("modalSourcePath");
     const modalModId = document.getElementById("modalModId");
@@ -257,32 +289,54 @@
     const modalDirectUpload = document.getElementById("modalDirectUpload");
     const directUploadContainer = document.getElementById("directUploadContainer");
 
-    function setStatus(text, isError = false) {
-      statusBox.innerText = text;
-      statusBox.className = "status-box active" + (isError ? " error" : "");
+    function setStatus(text, isError = false, percent = null) {
+      statusContainer.style.display = "block";
+      statusContainer.className = "status-container" + (isError ? " error" : "");
+      statusText.innerText = text;
+
+      if (percent !== null && percent >= 0) {
+        progressBarBg.style.display = "block";
+        progressBarFill.style.width = percent + "%";
+      } else {
+        progressBarBg.style.display = "none";
+      }
     }
+
+    ipcRenderer.on("publish-status", (event, data) => {
+      setStatus(data.message, false, data.percent !== undefined ? data.percent : null);
+    });
 
     async function loadCatalog() {
       const res = await ipcRenderer.invoke("fetch-catalog");
       catalogTable.innerHTML = "";
-      if (res && res.success && res.mods.length > 0) {
-        res.mods.forEach(mod => {
-          const row = document.createElement("tr");
-          row.innerHTML = `
-            <td><code>${mod.id}</code></td>
-            <td><strong>${mod.name}</strong></td>
-            <td>${mod.version}</td>
-            <td><span style="background: #231936; color: #d8b4fe; padding: 2px 7px; border-radius: 4px; font-size: 0.8rem;">${mod.tier}</span></td>
-            <td>${(mod.file_size / 1024 / 1024).toFixed(2)} MB</td>
-            <td><button class="btn btn-danger" onclick="deleteMod('${mod.id}')">Delete</button></td>
-          `;
-          catalogTable.appendChild(row);
-        });
+      if (res && res.success) {
+        connBadge.className = "badge connected";
+        connBadge.innerText = "Connected: 192.168.86.111";
+
+        if (res.mods && res.mods.length > 0) {
+          res.mods.forEach(mod => {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+              <td><code>${mod.id}</code></td>
+              <td><strong>${mod.name}</strong></td>
+              <td>${mod.version}</td>
+              <td><span style="background: #231936; color: #d8b4fe; padding: 2px 7px; border-radius: 4px; font-size: 0.8rem;">${mod.tier}</span></td>
+              <td>${(mod.file_size / 1024 / 1024).toFixed(2)} MB</td>
+              <td><button class="btn btn-danger" onclick="deleteMod('${mod.id}')">Delete</button></td>
+            `;
+            catalogTable.appendChild(row);
+          });
+        } else {
+          catalogTable.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b; padding: 20px;">No mods published yet. Add a mod using the drop zone or browse buttons above.</td></tr>`;
+        }
       } else {
-        catalogTable.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b; padding: 20px;">No mods published yet. Add a mod using the drop zone or browse buttons above.</td></tr>`;
+        connBadge.className = "badge disconnected";
+        connBadge.innerText = "Offline (Backend Unreachable)";
+        catalogTable.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#f87171; padding: 20px;">Unable to reach backend server at 192.168.86.111:3000. Ensure server is running.</td></tr>`;
       }
     }
     loadCatalog();
+    setInterval(loadCatalog, 10000);
 
     window.deleteMod = async (modId) => {
       if (confirm(`Are you sure you want to remove '${modId}' from the cloud?`)) {
@@ -306,7 +360,7 @@
 
       if (ext.toLowerCase() === ".scs") {
         directUploadContainer.style.display = "flex";
-        modalDirectUpload.checked = false;
+        modalDirectUpload.checked = true;
       } else {
         directUploadContainer.style.display = "none";
         modalDirectUpload.checked = false;
@@ -333,7 +387,7 @@
       }
 
       uploadModal.classList.remove("active");
-      setStatus(`Processing & publishing '${name}'... Please wait.`);
+      setStatus(`Preparing '${name}'...`, false, 0);
 
       const result = await ipcRenderer.invoke("process-and-upload", {
         inputPath,
@@ -345,26 +399,23 @@
       });
 
       if (result && result.success) {
-        setStatus(`Success! '${name}' is locked and live on the cloud catalog.`);
+        setStatus(`Success! '${name}' is locked and live on the cloud catalog.`, false, 100);
         loadCatalog();
       } else {
         setStatus(`Failed to publish: ${result ? result.error : "Unknown error"}`, true);
       }
     });
 
-    // Browse Folder
     document.getElementById("btnSelectFolder").addEventListener("click", async () => {
       const folderPath = await ipcRenderer.invoke("dialog-select-folder");
       if (folderPath) openPublishModal(folderPath);
     });
 
-    // Browse File (.scs or .zip)
     document.getElementById("btnSelectFile").addEventListener("click", async () => {
       const filePath = await ipcRenderer.invoke("dialog-select-file");
       if (filePath) openPublishModal(filePath);
     });
 
-    // Drag and Drop Zone
     dropZone.addEventListener("dragover", (e) => {
       e.preventDefault();
       dropZone.classList.add("dragover");

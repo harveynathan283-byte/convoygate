@@ -2,14 +2,14 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const axios = require("axios");
-const FormData = require("form-data");
+const http = require("http");
 const AdmZip = require("adm-zip");
+const axios = require("axios");
 
 let mainWindow;
 const SERVER_URL = "http://192.168.86.111:3000";
 
-// IEEE 802.3 CRC32 Implementation (Compatible with all Node / Electron versions)
+// Fast CRC32 table
 const CRC_TABLE = new Uint32Array(256);
 for (let i = 0; i < 256; i++) {
   let c = i >>> 0;
@@ -46,7 +46,6 @@ function createWindow() {
 
 app.whenReady().then(createWindow);
 
-// Collect all files recursively
 function getAllFiles(dir, base = "") {
   let results = [];
   const list = fs.readdirSync(dir, { withFileTypes: true });
@@ -62,8 +61,7 @@ function getAllFiles(dir, base = "") {
   return results;
 }
 
-// Low-level ZIP writer that sets ATS-readable, WinRAR-blocking flags
-function lockDirectoryToScs(sourceFolder, outputPath) {
+function lockDirectoryToScs(sourceFolder, outputPath, onProgress) {
   const files = getAllFiles(sourceFolder);
   if (files.length === 0) {
     throw new Error("Folder contains no mod assets.");
@@ -80,12 +78,15 @@ function lockDirectoryToScs(sourceFolder, outputPath) {
     const crc = calculateCrc32(fileBuf);
     const size = fileBuf.length;
 
-    // Local Header (Store mode for native ATS engine streaming)
+    if (onProgress && i % 100 === 0) {
+      onProgress(i + 1, files.length);
+    }
+
     const lfh = Buffer.alloc(30);
-    lfh.writeUInt32LE(0x04034b50, 0); // PK\x03\x04
+    lfh.writeUInt32LE(0x04034b50, 0);
     lfh.writeUInt16LE(20, 4);
     lfh.writeUInt16LE(0, 6);
-    lfh.writeUInt16LE(0, 8);          // Compression: Store (0)
+    lfh.writeUInt16LE(0, 8);
     lfh.writeUInt16LE(0, 10);
     lfh.writeUInt16LE(0, 12);
     lfh.writeUInt32LE(crc, 14);
@@ -103,13 +104,12 @@ function lockDirectoryToScs(sourceFolder, outputPath) {
     const localHeaderOffset = currentOffset - lfh.length - nameBuf.length;
     currentOffset += fileBuf.length;
 
-    // Central Directory Entry (Flags configured to block WinRAR / 7-Zip extraction)
     const cd = Buffer.alloc(46);
-    cd.writeUInt32LE(0x02014b50, 0);  // PK\x01\x02
+    cd.writeUInt32LE(0x02014b50, 0);
     cd.writeUInt16LE(0x0314, 4);
-    cd.writeUInt16LE(99, 6);          // Flagged for v9.9
-    cd.writeUInt16LE(0x0001, 8);      // Bit 0: Encrypted flag
-    cd.writeUInt16LE(0, 10);          // Method: Store
+    cd.writeUInt16LE(99, 6);
+    cd.writeUInt16LE(0x0001, 8);
+    cd.writeUInt16LE(0, 10);
     cd.writeUInt16LE(0, 12);
     cd.writeUInt16LE(0, 14);
     cd.writeUInt32LE(crc, 16);
@@ -135,9 +135,8 @@ function lockDirectoryToScs(sourceFolder, outputPath) {
   }
   const cdSize = currentOffset - cdStartOffset;
 
-  // End of Central Directory
   const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0); // PK\x05\x06
+  eocd.writeUInt32LE(0x06054b50, 0);
   eocd.writeUInt16LE(0, 4);
   eocd.writeUInt16LE(0, 6);
   eocd.writeUInt16LE(files.length, 8);
@@ -150,7 +149,52 @@ function lockDirectoryToScs(sourceFolder, outputPath) {
   fs.closeSync(outFd);
 }
 
-// Native Windows Browse Dialogs
+// Native Node direct binary stream uploader (No multipart boundary issues, No ECONNRESET)
+function streamUploadToBackend(filePath, headers, onProgress) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${SERVER_URL}/api/v1/admin/upload-stream`);
+    const stat = fs.statSync(filePath);
+
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": stat.size,
+          ...headers,
+        },
+      },
+      (res) => {
+        let responseBody = "";
+        res.on("data", (chunk) => (responseBody += chunk));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(responseBody));
+          } catch {
+            resolve({ success: res.statusCode >= 200 && res.statusCode < 300, data: responseBody });
+          }
+        });
+      }
+    );
+
+    req.on("error", (err) => reject(err));
+
+    const fileStream = fs.createReadStream(filePath);
+    let bytesUploaded = 0;
+    fileStream.on("data", (chunk) => {
+      bytesUploaded += chunk.length;
+      if (onProgress) {
+        onProgress(bytesUploaded, stat.size);
+      }
+    });
+
+    fileStream.pipe(req);
+  });
+}
+
 ipcMain.handle("dialog-select-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Select Uncompressed Mod Folder",
@@ -170,7 +214,6 @@ ipcMain.handle("dialog-select-file", async () => {
   return result.filePaths[0];
 });
 
-// Process Mod (Folder, .zip, or .scs) and Stream to Server
 ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, version, tier, directUpload }) => {
   let tempExtractDir = null;
   let finalScsFile = null;
@@ -184,6 +227,7 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
       let folderToPack = inputPath;
 
       if (stat.isFile()) {
+        event.sender.send("publish-status", { message: "Unpacking archive for locking..." });
         tempExtractDir = path.join(os.tmpdir(), `cg_extract_${Date.now()}`);
         fs.mkdirSync(tempExtractDir, { recursive: true });
 
@@ -193,21 +237,33 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
       }
 
       finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
-      lockDirectoryToScs(folderToPack, finalScsFile);
+      event.sender.send("publish-status", { message: "Locking assets with ATS encryption headers..." });
+
+      lockDirectoryToScs(folderToPack, finalScsFile, (current, total) => {
+        event.sender.send("publish-status", { message: `Locking assets: ${current} / ${total} files...` });
+      });
     }
 
-    const form = new FormData();
-    form.append("modId", modId);
-    form.append("name", name);
-    form.append("version", version);
-    form.append("tier", tier);
-    form.append("file", fs.createReadStream(finalScsFile));
+    event.sender.send("publish-status", { message: "Connecting to server stream..." });
 
-    const res = await axios.post(`${SERVER_URL}/api/v1/admin/upload`, form, {
-      headers: form.getHeaders(),
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    });
+    const result = await streamUploadToBackend(
+      finalScsFile,
+      {
+        "x-mod-id": encodeURIComponent(modId),
+        "x-mod-name": encodeURIComponent(name),
+        "x-mod-version": encodeURIComponent(version),
+        "x-mod-tier": encodeURIComponent(tier),
+      },
+      (bytesSent, totalBytes) => {
+        const percent = Math.round((bytesSent / totalBytes) * 100);
+        const sentMB = (bytesSent / 1024 / 1024).toFixed(1);
+        const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
+        event.sender.send("publish-status", {
+          message: `Uploading: ${percent}% (${sentMB} MB / ${totalMB} MB)...`,
+          percent,
+        });
+      }
+    );
 
     if (tempExtractDir && fs.existsSync(tempExtractDir)) {
       fs.rmSync(tempExtractDir, { recursive: true, force: true });
@@ -216,7 +272,7 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
       fs.unlinkSync(finalScsFile);
     }
 
-    return res.data;
+    return result;
   } catch (err) {
     if (tempExtractDir && fs.existsSync(tempExtractDir)) {
       fs.rmSync(tempExtractDir, { recursive: true, force: true });
@@ -236,7 +292,7 @@ ipcMain.handle("fetch-catalog", async () => {
 
 ipcMain.handle("delete-mod", async (event, modId) => {
   try {
-    const res = await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${modId}`);
+    const res = await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${modId}`, { timeout: 8000 });
     return res.data;
   } catch (err) {
     return { success: false, error: err.message };
