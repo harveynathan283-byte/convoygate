@@ -6,98 +6,53 @@
   <style>
     * { box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       background: #0d0f17;
       color: #e2e8f0;
       margin: 0;
-      padding: 30px;
+      padding: 24px;
+      user-select: none;
     }
     .header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 25px;
+      margin-bottom: 20px;
       border-bottom: 1px solid #1f2438;
-      padding-bottom: 15px;
+      padding-bottom: 14px;
     }
-    h1 {
-      margin: 0;
-      color: #9d4edd;
-      font-size: 1.8rem;
-    }
+    h1 { margin: 0; color: #9d4edd; font-size: 1.6rem; }
     .badge {
       background: #240046;
       color: #c77dff;
-      padding: 6px 14px;
-      border-radius: 20px;
-      font-size: 0.85rem;
+      padding: 5px 12px;
+      border-radius: 16px;
+      font-size: 0.8rem;
       border: 1px solid #5a189a;
     }
     .drop-zone {
       border: 2px dashed #5a189a;
       background: #141724;
-      border-radius: 12px;
-      padding: 45px 20px;
+      border-radius: 10px;
+      padding: 30px 20px;
       text-align: center;
       cursor: pointer;
       transition: all 0.2s ease;
-      margin-bottom: 30px;
+      margin-bottom: 15px;
     }
     .drop-zone:hover, .drop-zone.dragover {
       border-color: #9d4edd;
-      background: #1b1f33;
+      background: #1c2033;
     }
-    .drop-zone h3 {
-      margin: 0 0 8px 0;
-      color: #f1f5f9;
-      font-size: 1.25rem;
-    }
-    .drop-zone p {
-      margin: 0;
-      color: #94a3b8;
-      font-size: 0.95rem;
-    }
-    .status-box {
-      display: none;
-      padding: 14px 18px;
-      border-radius: 8px;
-      margin-bottom: 25px;
-      font-size: 0.95rem;
-    }
-    .status-box.active {
-      display: block;
-      background: #192b23;
-      color: #4ade80;
-      border: 1px solid #22543d;
-    }
-    .status-box.error {
-      display: block;
-      background: #3b181f;
-      color: #f87171;
-      border: 1px solid #771d2d;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #141724;
-      border-radius: 10px;
-      overflow: hidden;
-      border: 1px solid #1f2438;
-    }
-    th, td {
-      padding: 14px 18px;
-      text-align: left;
-      border-bottom: 1px solid #1f2438;
-    }
-    th {
-      background: #1b1f33;
-      color: #94a3b8;
-      font-size: 0.85rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+    .drop-zone h3 { margin: 0 0 6px 0; color: #f1f5f9; font-size: 1.15rem; }
+    .drop-zone p { margin: 0; color: #94a3b8; font-size: 0.9rem; }
+    .actions-bar {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
     }
     .btn {
-      padding: 7px 12px;
+      padding: 9px 15px;
       border-radius: 6px;
       border: none;
       cursor: pointer;
@@ -105,9 +60,95 @@
       font-size: 0.85rem;
       transition: opacity 0.2s;
     }
-    .btn:hover { opacity: 0.85; }
+    .btn:hover { opacity: 0.9; }
+    .btn-primary { background: #7b2cbf; color: #fff; }
+    .btn-secondary { background: #242940; color: #cbd5e1; border: 1px solid #333a56; }
     .btn-danger { background: #e63946; color: #fff; }
-    .btn-refresh { background: #3c096c; color: #e0aaff; margin-bottom: 15px; }
+    .status-box {
+      display: none;
+      padding: 12px 16px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 0.9rem;
+    }
+    .status-box.active {
+      display: block;
+      background: #162a21;
+      color: #4ade80;
+      border: 1px solid #1f5139;
+    }
+    .status-box.error {
+      display: block;
+      background: #38151b;
+      color: #f87171;
+      border: 1px solid #631d27;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #141724;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #1f2438;
+    }
+    th, td {
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid #1f2438;
+    }
+    th {
+      background: #191c2b;
+      color: #94a3b8;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* Modal Overlay */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-card {
+      background: #161926;
+      border: 1px solid #323954;
+      border-radius: 12px;
+      width: 480px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .modal-card h2 { margin: 0 0 15px 0; color: #9d4edd; font-size: 1.3rem; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 6px; }
+    .form-group input, .form-group select {
+      width: 100%;
+      padding: 9px 12px;
+      background: #0f111a;
+      border: 1px solid #2a3147;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 0.9rem;
+    }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 15px 0 20px 0;
+      color: #cbd5e1;
+      font-size: 0.85rem;
+    }
+    .modal-buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
   </style>
 </head>
 <body>
@@ -115,23 +156,25 @@
   <div class="header">
     <div>
       <h1>ConvoyGate Admin Publisher</h1>
-      <small style="color: #64748b;">Lock assets & deploy live to subscribers</small>
+      <small style="color: #64748b;">Lock assets & sync live with subscribers</small>
     </div>
-    <div class="badge">Master Key Active</div>
+    <div class="badge">Backend: 192.168.86.111</div>
   </div>
 
   <div class="drop-zone" id="dropZone">
-    <h3>Drop Mod Folder Here to Pack & Publish</h3>
-    <p>Automatically applies SCS header obfuscation, locks assets, and uploads to catalog</p>
+    <h3>Drop Mod Here (.scs, .zip, or Folder)</h3>
+    <p>Automatically applies SCS header obfuscation and streams to catalog</p>
+  </div>
+
+  <div class="actions-bar">
+    <button class="btn btn-secondary" id="btnSelectFolder">📁 Browse Folder</button>
+    <button class="btn btn-secondary" id="btnSelectFile">📦 Browse .SCS / .ZIP File</button>
+    <button class="btn btn-secondary" style="margin-left: auto;" onclick="loadCatalog()">🔄 Refresh Catalog</button>
   </div>
 
   <div id="statusBox" class="status-box"></div>
 
-  <div style="display: flex; justify-content: space-between; align-items: center;">
-    <h2 style="font-size: 1.2rem; margin: 0 0 12px 0;">Live Mod Catalog</h2>
-    <button class="btn btn-refresh" onclick="loadCatalog()">Refresh Catalog</button>
-  </div>
-
+  <h2 style="font-size: 1.1rem; margin: 15px 0 10px 0; color: #cbd5e1;">Live Cloud Catalog</h2>
   <table>
     <thead>
       <tr>
@@ -146,14 +189,73 @@
     <tbody id="catalogTable"></tbody>
   </table>
 
+  <!-- Publisher Modal -->
+  <div class="modal-overlay" id="uploadModal">
+    <div class="modal-card">
+      <h2>Publish Mod to Catalog</h2>
+      
+      <div class="form-group">
+        <label>Selected Source</label>
+        <input type="text" id="modalSourcePath" readonly style="opacity: 0.6; cursor: not-allowed;">
+      </div>
+
+      <div class="form-group">
+        <label>Mod Slug / Identifier (lowercase, no spaces)</label>
+        <input type="text" id="modalModId" placeholder="e.g. volvo-fh-rigid">
+      </div>
+
+      <div class="form-group">
+        <label>Display Title</label>
+        <input type="text" id="modalModName" placeholder="e.g. Volvo FH Rigid Addon">
+      </div>
+
+      <div class="form-group">
+        <label>Version</label>
+        <input type="text" id="modalVersion" value="1.0.0">
+      </div>
+
+      <div class="form-group">
+        <label>Required Subscription Tier</label>
+        <select id="modalTier">
+          <option value="All">All Subscribers (Default)</option>
+          <option value="VIP">VIP Tier Only</option>
+          <option value="Tier 1">Tier 1</option>
+        </select>
+      </div>
+
+      <div class="checkbox-group" id="directUploadContainer">
+        <input type="checkbox" id="modalDirectUpload">
+        <label for="modalDirectUpload">File is already locked .scs (bypass re-packing)</label>
+      </div>
+
+      <div class="modal-buttons">
+        <button class="btn btn-secondary" id="btnCancelModal">Cancel</button>
+        <button class="btn btn-primary" id="btnConfirmPublish">Lock & Publish Mod</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const { ipcRenderer } = require("electron");
     const path = require("path");
-    const os = require("os");
+
+    // Prevent default window drag/drop behavior that blocks drops
+    window.addEventListener("dragover", (e) => e.preventDefault());
+    window.addEventListener("drop", (e) => e.preventDefault());
 
     const dropZone = document.getElementById("dropZone");
     const statusBox = document.getElementById("statusBox");
     const catalogTable = document.getElementById("catalogTable");
+
+    // Modal elements
+    const uploadModal = document.getElementById("uploadModal");
+    const modalSourcePath = document.getElementById("modalSourcePath");
+    const modalModId = document.getElementById("modalModId");
+    const modalModName = document.getElementById("modalModName");
+    const modalVersion = document.getElementById("modalVersion");
+    const modalTier = document.getElementById("modalTier");
+    const modalDirectUpload = document.getElementById("modalDirectUpload");
+    const directUploadContainer = document.getElementById("directUploadContainer");
 
     function setStatus(text, isError = false) {
       statusBox.innerText = text;
@@ -163,34 +265,106 @@
     async function loadCatalog() {
       const res = await ipcRenderer.invoke("fetch-catalog");
       catalogTable.innerHTML = "";
-      if (res.success && res.mods.length > 0) {
+      if (res && res.success && res.mods.length > 0) {
         res.mods.forEach(mod => {
           const row = document.createElement("tr");
           row.innerHTML = `
             <td><code>${mod.id}</code></td>
             <td><strong>${mod.name}</strong></td>
             <td>${mod.version}</td>
-            <td><span style="background: #2b1b40; color: #d8b4fe; padding: 3px 8px; border-radius: 4px;">${mod.tier}</span></td>
+            <td><span style="background: #231936; color: #d8b4fe; padding: 2px 7px; border-radius: 4px; font-size: 0.8rem;">${mod.tier}</span></td>
             <td>${(mod.file_size / 1024 / 1024).toFixed(2)} MB</td>
             <td><button class="btn btn-danger" onclick="deleteMod('${mod.id}')">Delete</button></td>
           `;
           catalogTable.appendChild(row);
         });
       } else {
-        catalogTable.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b;">No mods uploaded yet. Drag a folder above to publish.</td></tr>`;
+        catalogTable.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b; padding: 20px;">No mods published yet. Add a mod using the drop zone or browse buttons above.</td></tr>`;
       }
     }
     loadCatalog();
 
     window.deleteMod = async (modId) => {
-      if (confirm(`Are you sure you want to delete '${modId}' from the cloud?`)) {
+      if (confirm(`Are you sure you want to remove '${modId}' from the cloud?`)) {
         setStatus(`Deleting ${modId}...`);
         await ipcRenderer.invoke("delete-mod", modId);
-        setStatus(`Mod '${modId}' removed from catalog.`);
+        setStatus(`Mod '${modId}' removed from server.`);
         loadCatalog();
       }
     };
 
+    function openPublishModal(selectedPath) {
+      const rawBase = path.basename(selectedPath);
+      const ext = path.extname(rawBase);
+      const cleanSlug = path.basename(selectedPath, ext).toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+
+      modalSourcePath.value = selectedPath;
+      modalModId.value = cleanSlug;
+      modalModName.value = path.basename(selectedPath, ext);
+      modalVersion.value = "1.0.0";
+      modalTier.value = "All";
+
+      if (ext.toLowerCase() === ".scs") {
+        directUploadContainer.style.display = "flex";
+        modalDirectUpload.checked = false;
+      } else {
+        directUploadContainer.style.display = "none";
+        modalDirectUpload.checked = false;
+      }
+
+      uploadModal.classList.add("active");
+    }
+
+    document.getElementById("btnCancelModal").addEventListener("click", () => {
+      uploadModal.classList.remove("active");
+    });
+
+    document.getElementById("btnConfirmPublish").addEventListener("click", async () => {
+      const inputPath = modalSourcePath.value;
+      const modId = modalModId.value.trim();
+      const name = modalModName.value.trim();
+      const version = modalVersion.value.trim() || "1.0.0";
+      const tier = modalTier.value;
+      const directUpload = modalDirectUpload.checked;
+
+      if (!modId || !name) {
+        alert("Please provide both Mod Slug and Display Title.");
+        return;
+      }
+
+      uploadModal.classList.remove("active");
+      setStatus(`Processing & publishing '${name}'... Please wait.`);
+
+      const result = await ipcRenderer.invoke("process-and-upload", {
+        inputPath,
+        modId,
+        name,
+        version,
+        tier,
+        directUpload,
+      });
+
+      if (result && result.success) {
+        setStatus(`Success! '${name}' is locked and live on the cloud catalog.`);
+        loadCatalog();
+      } else {
+        setStatus(`Failed to publish: ${result ? result.error : "Unknown error"}`, true);
+      }
+    });
+
+    // Browse Folder
+    document.getElementById("btnSelectFolder").addEventListener("click", async () => {
+      const folderPath = await ipcRenderer.invoke("dialog-select-folder");
+      if (folderPath) openPublishModal(folderPath);
+    });
+
+    // Browse File (.scs or .zip)
+    document.getElementById("btnSelectFile").addEventListener("click", async () => {
+      const filePath = await ipcRenderer.invoke("dialog-select-file");
+      if (filePath) openPublishModal(filePath);
+    });
+
+    // Drag and Drop Zone
     dropZone.addEventListener("dragover", (e) => {
       e.preventDefault();
       dropZone.classList.add("dragover");
@@ -200,44 +374,13 @@
       dropZone.classList.remove("dragover");
     });
 
-    dropZone.addEventListener("drop", async (e) => {
+    dropZone.addEventListener("drop", (e) => {
       e.preventDefault();
       dropZone.classList.remove("dragover");
 
-      if (!e.dataTransfer.files.length) return;
-      const sourceFolder = e.dataTransfer.files[0].path;
-      const folderName = path.basename(sourceFolder);
-
-      const modName = prompt("Enter Mod Display Name:", folderName);
-      if (!modName) return;
-
-      const requiredTier = prompt("Required Subscription Tier (e.g. VIP, Basic, All):", "All");
-      if (!requiredTier) return;
-
-      const tempScs = path.join(os.tmpdir(), `${folderName}.scs`);
-
-      setStatus(`Step 1/2: Packing and locking '${folderName}' archive locally...`);
-      const packRes = await ipcRenderer.invoke("pack-mod", { sourceFolder, outputPath: tempScs });
-
-      if (!packRes.success) {
-        setStatus(`Packing Failed: ${packRes.error}`, true);
-        return;
-      }
-
-      setStatus(`Step 2/2: Uploading locked package (${(packRes.size / 1024 / 1024).toFixed(2)} MB) to cloud...`);
-      const uploadRes = await ipcRenderer.invoke("upload-mod", {
-        filePath: tempScs,
-        modId: folderName,
-        name: modName,
-        version: "1.0.0",
-        tier: requiredTier,
-      });
-
-      if (uploadRes.success) {
-        setStatus(`Success! '${modName}' is now locked and live on the catalog.`);
-        loadCatalog();
-      } else {
-        setStatus(`Upload Failed: ${uploadRes.error}`, true);
+      if (e.dataTransfer.files.length > 0) {
+        const droppedPath = e.dataTransfer.files[0].path;
+        if (droppedPath) openPublishModal(droppedPath);
       }
     });
   </script>

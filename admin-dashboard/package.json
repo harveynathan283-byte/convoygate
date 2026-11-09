@@ -8,6 +8,7 @@
     "dist": "electron-builder --win portable"
   },
   "dependencies": {
+    "adm-zip": "^0.5.12",
     "axios": "^1.6.8",
     "form-data": "^4.0.0"
   },
