@@ -1,90 +1,67 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const crypto = require("crypto");
+const { pipeline } = require("stream/promises");
+const { Transform } = require("stream");
 const { execSync } = require("child_process");
 const axios = require("axios");
 
 let mainWindow;
 
-// 1. Matches GetVolumeInformationA from convoygate_plugin.cpp
-function getLocalHWID() {
-  if (process.platform === "win32") {
-    try {
-      const output = execSync("vol C:", { encoding: "utf8" });
-      const match = output.match(/([0-9A-Fa-f]{4})-([0-9A-Fa-f]{4})/);
-      if (match) {
-        return `WIN-${match[1]}${match[2]}`.toUpperCase();
+// Normalize Hardware ID / Computer Name
+function getSystemHwid() {
+  try {
+    const raw = execSync(
+      'reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid',
+      { encoding: "utf8" }
+    );
+    const match = raw.match(/MachineGuid\s+REG_SZ\s+([^\r\n]+)/i);
+    if (match && match[1]) {
+      return match[1].replace(/[^a-zA-Z0-9]/g, "").toLowerCase().trim();
+    }
+  } catch (err) {
+    // Fallback to computer name
+  }
+  return os.hostname().replace(/[^a-zA-Z0-9]/g, "").toLowerCase().trim();
+}
+
+function findAtsPluginDir() {
+  const commonPaths = [
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "C:\\Program Files\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "D:\\SteamLibrary\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "E:\\SteamLibrary\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "F:\\SteamLibrary\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+  ];
+
+  for (const p of commonPaths) {
+    const parent = path.dirname(p);
+    if (fs.existsSync(parent)) {
+      if (!fs.existsSync(p)) {
+        fs.mkdirSync(p, { recursive: true });
       }
-    } catch (err) {
-      console.error("[HWID] Error reading volume serial:", err);
+      return p;
     }
   }
-
-  // Fallback for macOS development
-  const username = os.userInfo().username;
-  const hash = crypto.createHash("md5").update(username).digest("hex").substring(0, 8).toUpperCase();
-  return `WIN-${hash}`;
+  return null;
 }
 
-// 2. Resolve ATS directory structure
-function getAtsPaths() {
-  const home = os.homedir();
-  if (process.platform === "win32") {
-    return {
-      modDir: path.join(home, "Documents", "American Truck Simulator", "mod"),
-      pluginDir: "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
-      binDir: "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64",
-      rootDir: "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator",
-    };
-  } else {
-    return {
-      modDir: path.join(home, "Library", "Application Support", "American Truck Simulator", "mod"),
-      pluginDir: path.join(home, "Library", "Application Support", "Steam", "steamapps", "common", "American Truck Simulator", "plugins"),
-      binDir: path.join(home, "Library", "Application Support", "Steam", "steamapps", "common", "American Truck Simulator", "bin", "win_x64"),
-      rootDir: path.join(home, "Library", "Application Support", "Steam", "steamapps", "common", "American Truck Simulator"),
-    };
+function getAtsModDir() {
+  const docDir = path.join(os.homedir(), "Documents", "American Truck Simulator", "mod");
+  if (!fs.existsSync(docDir)) {
+    fs.mkdirSync(docDir, { recursive: true });
   }
-}
-
-// 3. Built-in CVG1 Decryptor & Mod Deployer
-function unpackCvgPackage(dataBuffer, targetDir, hexKey) {
-  const aesKey = Buffer.from(hexKey, "hex");
-  const manifestLen = dataBuffer.readUInt32LE(4);
-  const manifestJson = dataBuffer.toString("utf-8", 8, 8 + manifestLen);
-  const manifest = JSON.parse(manifestJson);
-
-  let offset = 8 + manifestLen;
-  fs.mkdirSync(targetDir, { recursive: true });
-
-  for (const item of manifest) {
-    const chunk = dataBuffer.subarray(offset, offset + item.packedSize);
-    offset += item.packedSize;
-
-    const destPath = path.join(targetDir, item.file);
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-
-    if (item.encrypted) {
-      const iv = chunk.subarray(0, 12);
-      const tag = chunk.subarray(12, 28);
-      const ciphertext = chunk.subarray(28);
-
-      const decipher = crypto.createDecipheriv("aes-256-gcm", aesKey, iv);
-      decipher.setAuthTag(tag);
-      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-      fs.writeFileSync(destPath, decrypted);
-    } else {
-      fs.writeFileSync(destPath, chunk);
-    }
-  }
+  return docDir;
 }
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 820,
-    height: 620,
-    resizable: false,
+    width: 720,
+    height: 660,
+    minWidth: 640,
+    minHeight: 580,
+    backgroundColor: "#0d0f17",
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: true,
@@ -95,68 +72,99 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "index.html"));
 }
 
-app.whenReady().then(() => {
-  createWindow();
+app.whenReady().then(createWindow);
 
-  ipcMain.handle("get-hwid", () => {
-    return getLocalHWID();
-  });
+ipcMain.handle("get-hwid", () => {
+  return getSystemHwid();
+});
 
-  ipcMain.handle("sync-mod", async (event, { serverUrl, discordId, modId }) => {
-    const hwid = getLocalHWID();
-    const ats = getAtsPaths();
+ipcMain.handle("sync-mod-and-lease", async (event, { serverUrl, discordId, modId, hwid }) => {
+  try {
+    // Step 1: Acquire Signed 30-Day Lease
+    event.sender.send("sync-progress", { message: "Connecting to license server...", percent: 5 });
 
-    // Step A: Request signed 30-day lease
-    const leaseRes = await axios.post(`${serverUrl}/api/v1/license/lease`, {
-      discordId,
-      hwid,
-      modId,
-    });
+    const leaseRes = await axios.post(
+      `${serverUrl}/api/v1/license/lease`,
+      { discordId, hwid, modId },
+      { timeout: 10000 }
+    );
 
-    if (!leaseRes.data.success) {
-      throw new Error(leaseRes.data.error || "Subscription verification failed.");
+    if (!leaseRes.data || !leaseRes.data.success) {
+      return { success: false, error: leaseRes.data?.error || "Lease request denied by server." };
     }
 
-    // Step B: Write compact convoygate.key to plugin & root paths
-    fs.mkdirSync(ats.pluginDir, { recursive: true });
-    const keyPath = path.join(ats.pluginDir, "convoygate.key");
-    const compactKey = JSON.stringify(leaseRes.data.lease);
-    fs.writeFileSync(keyPath, compactKey);
+    const leaseData = leaseRes.data.lease;
 
-    try {
-      fs.writeFileSync(path.join(ats.binDir, "convoygate.key"), compactKey);
-      fs.writeFileSync(path.join(ats.rootDir, "convoygate.key"), compactKey);
-    } catch (_) {}
-
-    // Step C: Download encrypted mod package
-    fs.mkdirSync(ats.modDir, { recursive: true });
-    const downloadRes = await axios.get(`${serverUrl}/api/v1/client/download/${modId}`, {
-      responseType: "arraybuffer",
-    });
-    const packageBuffer = Buffer.from(downloadRes.data);
-
-    // Step D: Detect CVG1 container vs Standard ZIP
-    const magic = packageBuffer.length >= 4 ? packageBuffer.toString("utf-8", 0, 4) : "";
-    const targetFolder = path.join(ats.modDir, modId);
-    const targetScs = path.join(ats.modDir, `${modId}.scs`);
-
-    if (magic === "CVG1") {
-      // Remove stale/corrupted binary .scs file if present
-      if (fs.existsSync(targetScs)) fs.unlinkSync(targetScs);
-
-      // Decrypt directly into ATS folder-mod format
-      const aesKey = leaseRes.data.aesKey || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-      unpackCvgPackage(packageBuffer, targetFolder, aesKey);
-
-      return { keyPath, modPath: targetFolder };
-    } else {
-      // Direct SCS archive
-      fs.writeFileSync(targetScs, packageBuffer);
-      return { keyPath, modPath: targetScs };
+    // Step 2: Write convoygate.key into ATS plugins folder
+    const pluginDir = findAtsPluginDir();
+    if (!pluginDir) {
+      return {
+        success: false,
+        error: "Could not find 'American Truck Simulator\\bin\\win_x64\\plugins'. Ensure ATS is installed via Steam.",
+      };
     }
-  });
+
+    const keyPath = path.join(pluginDir, "convoygate.key");
+    fs.writeFileSync(keyPath, JSON.stringify(leaseData, null, 2), "utf8");
+    event.sender.send("sync-progress", { message: "30-day hardware lease verified and saved.", percent: 15 });
+
+    // Step 3: Stream Download with Live Byte Tracking
+    const modDir = getAtsModDir();
+    const modPath = path.join(modDir, `${modId}.scs`);
+    const tempModPath = path.join(modDir, `${modId}.scs.download`);
+
+    event.sender.send("sync-progress", { message: "Requesting mod package from catalog...", percent: 20 });
+
+    const downloadRes = await axios({
+      url: `${serverUrl}/api/v1/client/download/${modId}`,
+      method: "GET",
+      responseType: "stream",
+      timeout: 30000,
+    });
+
+    const totalBytes = parseInt(downloadRes.headers["content-length"] || "0", 10);
+    let receivedBytes = 0;
+
+    const progressTransform = new Transform({
+      transform(chunk, encoding, callback) {
+        receivedBytes += chunk.length;
+        if (totalBytes > 0) {
+          const percent = 20 + Math.round((receivedBytes / totalBytes) * 75);
+          const currentMB = (receivedBytes / 1024 / 1024).toFixed(1);
+          const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
+          event.sender.send("sync-progress", {
+            message: `Downloading mod: ${currentMB} MB / ${totalMB} MB (${Math.round((receivedBytes / totalBytes) * 100)}%)...`,
+            percent,
+          });
+        }
+        callback(null, chunk);
+      },
+    });
+
+    const fileWriter = fs.createWriteStream(tempModPath);
+    await pipeline(downloadRes.data, progressTransform, fileWriter);
+
+    if (fs.existsSync(modPath)) {
+      fs.unlinkSync(modPath);
+    }
+    fs.renameSync(tempModPath, modPath);
+
+    event.sender.send("sync-progress", { message: "Download completed and verified.", percent: 100 });
+
+    return {
+      success: true,
+      message: `Sync successful!\n- Key: ${keyPath}\n- Mod: ${modPath}\n\nYou can now launch American Truck Simulator!`,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err.code === "ECONNREFUSED"
+        ? `Could not reach server at ${serverUrl}. Ensure backend is running.`
+        : err.message,
+    };
+  }
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  app.quit();
 });

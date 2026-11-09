@@ -10,14 +10,14 @@
       background: #0d0f17;
       color: #e2e8f0;
       margin: 0;
-      padding: 30px;
+      padding: 28px;
       user-select: none;
     }
     .header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 25px;
+      margin-bottom: 22px;
       border-bottom: 1px solid #1f2438;
       padding-bottom: 15px;
     }
@@ -28,11 +28,12 @@
       border: 1px solid #0369a1;
       padding: 5px 12px;
       border-radius: 14px;
-      font-size: 0.75rem;
+      font-size: 0.8rem;
       font-family: monospace;
+      font-weight: 600;
     }
     .form-group {
-      margin-bottom: 18px;
+      margin-bottom: 16px;
     }
     label {
       display: block;
@@ -40,14 +41,14 @@
       font-size: 0.8rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
     input {
       width: 100%;
       background: #141724;
       border: 1px solid #242b42;
       border-radius: 8px;
-      padding: 12px 14px;
+      padding: 11px 14px;
       color: #f8fafc;
       font-size: 0.95rem;
       outline: none;
@@ -60,33 +61,54 @@
       color: #fff;
       border: none;
       border-radius: 8px;
-      padding: 14px;
+      padding: 13px;
       font-size: 1rem;
       font-weight: 600;
       cursor: pointer;
       margin-top: 10px;
-      transition: background 0.2s;
+      transition: opacity 0.2s;
     }
-    .btn-sync:hover { background: #0369a1; }
+    .btn-sync:hover { opacity: 0.9; }
+    .btn-sync:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    .progress-bar-bg {
+      display: none;
+      width: 100%;
+      height: 8px;
+      background: #141724;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 18px;
+    }
+    .progress-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: #38bdf8;
+      transition: width 0.15s ease;
+    }
+
     .log-box {
-      margin-top: 25px;
+      margin-top: 18px;
       background: #10131e;
       border: 1px solid #1e2438;
       border-radius: 8px;
-      padding: 15px;
+      padding: 14px;
       font-family: monospace;
       font-size: 0.85rem;
       min-height: 110px;
+      max-height: 140px;
+      overflow-y: auto;
       white-space: pre-wrap;
       color: #38bdf8;
     }
+    .log-box.error { color: #f87171; border-color: #7f1d1d; }
   </style>
 </head>
 <body>
 
   <div class="header">
     <h1>ConvoyGate Launcher</h1>
-    <div id="hwidBadge" class="badge">Detecting...</div>
+    <div id="hwidBadge" class="badge">Detecting HWID...</div>
   </div>
 
   <div class="form-group">
@@ -96,7 +118,7 @@
 
   <div class="form-group">
     <label>Discord Account ID</label>
-    <input type="text" id="discordId" placeholder="e.g. 84920491823901923" value="123456789">
+    <input type="text" id="discordId" placeholder="e.g. 123456789" value="123456">
   </div>
 
   <div class="form-group">
@@ -106,6 +128,10 @@
 
   <button class="btn-sync" id="btnSync">Sync Mod & Verify 30-Day Lease</button>
 
+  <div id="progressBarBg" class="progress-bar-bg">
+    <div id="progressBarFill" class="progress-bar-fill"></div>
+  </div>
+
   <div id="logBox" class="log-box">ConvoyGate Client Ready.</div>
 
   <script>
@@ -114,16 +140,24 @@
     let currentHwid = "";
     const hwidBadge = document.getElementById("hwidBadge");
     const logBox = document.getElementById("logBox");
+    const btnSync = document.getElementById("btnSync");
+    const progressBarBg = document.getElementById("progressBarBg");
+    const progressBarFill = document.getElementById("progressBarFill");
 
     async function initHwid() {
       currentHwid = await ipcRenderer.invoke("get-hwid");
-      hwidBadge.innerText = `HWID: ${currentHwid.substring(0, 12)}...`;
+      hwidBadge.innerText = `HWID: ${currentHwid.substring(0, 14)}...`;
       hwidBadge.title = currentHwid;
     }
     initHwid();
 
     ipcRenderer.on("sync-progress", (event, data) => {
       logBox.innerText += `\n> ${data.message}`;
+      logBox.scrollTop = logBox.scrollHeight;
+      if (data.percent !== undefined) {
+        progressBarBg.style.display = "block";
+        progressBarFill.style.width = data.percent + "%";
+      }
     });
 
     document.getElementById("btnSync").addEventListener("click", async () => {
@@ -136,6 +170,10 @@
         return;
       }
 
+      btnSync.disabled = true;
+      logBox.className = "log-box";
+      progressBarBg.style.display = "block";
+      progressBarFill.style.width = "5%";
       logBox.innerText = `[${new Date().toLocaleTimeString()}] Starting synchronization...`;
 
       const result = await ipcRenderer.invoke("sync-mod-and-lease", {
@@ -145,11 +183,16 @@
         hwid: currentHwid,
       });
 
+      btnSync.disabled = false;
+
       if (result.success) {
-        logBox.innerText += `\n\nSUCCESS:\n${result.message}\n\nYou can now launch American Truck Simulator!`;
+        progressBarFill.style.width = "100%";
+        logBox.innerText += `\n\nSUCCESS:\n${result.message}`;
       } else {
+        logBox.className = "log-box error";
         logBox.innerText += `\n\nERROR:\n${result.error}`;
       }
+      logBox.scrollTop = logBox.scrollHeight;
     });
   </script>
 </body>
