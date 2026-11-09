@@ -1,0 +1,28 @@
+{
+  "name": "convoygate-admin",
+  "version": "1.0.0",
+  "description": "ConvoyGate Admin Control Center",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "form-data": "^4.0.0"
+  },
+  "devDependencies": {
+    "electron": "^29.4.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.convoygate.admin",
+    "productName": "ConvoyGate-Admin",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "portable"
+    }
+  }
+}
