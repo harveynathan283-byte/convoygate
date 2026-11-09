@@ -1,26 +1,27 @@
 {
-  "name": "convoygate-launcher",
+  "name": "convoygate-client",
   "version": "1.0.0",
-  "description": "ConvoyGate Secure Mod Launcher for American Truck Simulator",
+  "description": "ConvoyGate Mod Launcher",
   "main": "src/main.js",
-  "author": "ConvoyGate",
   "scripts": {
     "start": "electron .",
-    "dist:win": "electron-builder --win --x64"
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "axios": "^1.6.8"
   },
   "devDependencies": {
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8"
+    "electron": "^29.4.0",
+    "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.convoygate.launcher",
-    "productName": "ConvoyGate Launcher",
+    "appId": "com.convoygate.client",
+    "productName": "ConvoyGate-Launcher",
     "directories": {
       "output": "dist"
     },
     "win": {
-      "target": ["portable", "nsis"],
-      "artifactName": "ConvoyGate-Launcher-Setup.${ext}"
+      "target": "portable"
     }
   }
 }

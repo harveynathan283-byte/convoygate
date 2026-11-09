@@ -1,58 +1,42 @@
-name: Build All ConvoyGate Windows Binaries
+name: Build Windows Executables
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
-  build-all-windows:
+  build:
     runs-on: windows-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js (v20 LTS for Windows builds)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # 1. Compile C++ Game Plugin (convoygate.dll)
-      - name: Setup MSVC Compiler
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Build C++ DLL
+      # 1. Build the Admin GUI Dashboard (.exe)
+      - name: Build Admin Dashboard GUI
         run: |
-          cmake -B build -S plugin -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release
-
-      # 2. Compile Standalone Mod Packer (.exe)
-      - name: Build Standalone Packer Executable
-        run: |
-          cd packer
+          cd admin-dashboard
           npm install
-          npm install -g @yao-pkg/pkg esbuild
-          npx esbuild src/cli.ts --bundle --platform=node --target=node20 --outfile=dist/packer.cjs
-          pkg dist/packer.cjs --targets node20-win-x64 --output dist/ConvoyGate-Packer.exe
+          npm run dist
 
-      # 3. Compile Subscriber Desktop Launcher (.exe)
-      - name: Build Desktop Launcher Executable
+      # 2. Build the Client Launcher (.exe)
+      - name: Build Client Launcher GUI
         run: |
           cd client
           npm install
-          npx electron-builder --win --x64
+          npm run dist
 
-      # 4. Upload All Binaries as an Artifact Suite
-      - name: Package Release Suite
-        run: |
-          mkdir release-suite
-          copy build\Release\convoygate.dll release-suite\
-          copy packer\dist\ConvoyGate-Packer.exe release-suite\
-          copy client\dist\ConvoyGate-Launcher-Setup*.exe release-suite\
-
-      - name: Upload Windows Binaries
+      # 3. Package both graphical apps together
+      - name: Upload Both GUI Apps
         uses: actions/upload-artifact@v4
         with:
-          name: ConvoyGate-Windows-Suite
-          path: release-suite/*
+          name: ConvoyGate-GUI-Suite
+          path: |
+            admin-dashboard/dist/*.exe
+            client/dist/*.exe
