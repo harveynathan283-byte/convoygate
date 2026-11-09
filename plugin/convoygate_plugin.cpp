@@ -16,13 +16,12 @@
 HMODULE g_hModule = NULL;
 bool g_bLeaseValid = false;
 
-// DRM Cipher Matching Admin Tool
+// Static DRM Cipher Key
 const unsigned char DRM_CIPHER_KEY[16] = {
     0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61,
     0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
 };
 
-// Track open file handles belonging to ConvoyGate protected packages
 std::unordered_map<HANDLE, bool> g_ProtectedHandles;
 CRITICAL_SECTION g_HandleLock;
 
@@ -47,7 +46,8 @@ std::string GetPluginDirectory() {
     return ".\\";
 }
 
-std::string GetSystemHwid() {
+// 1. Registry MachineGuid
+std::string GetSystemMachineGuid() {
     HKEY hKey;
     char guid[256] = { 0 };
     DWORD size = sizeof(guid);
@@ -56,6 +56,16 @@ std::string GetSystemHwid() {
         RegCloseKey(hKey);
     }
     return CleanString(std::string(guid));
+}
+
+// 2. Windows Computer Name (e.g. WIN-CC37CF3B)
+std::string GetSystemComputerName() {
+    char name[MAX_COMPUTERNAME_LENGTH + 1] = { 0 };
+    DWORD size = sizeof(name);
+    if (GetComputerNameA(name, &size)) {
+        return CleanString(std::string(name));
+    }
+    return "";
 }
 
 std::string Base64Decode(const std::string& input) {
@@ -109,9 +119,18 @@ bool ValidateActiveLease() {
 
     std::string leaseHwid = CleanString(ExtractJsonField(payloadJson, "hwid"));
     std::string expiresAtStr = ExtractJsonField(payloadJson, "expiresAt");
-    std::string localHwid = GetSystemHwid();
 
-    if (localHwid.empty() || leaseHwid != localHwid) return false;
+    std::string localGuid = GetSystemMachineGuid();
+    std::string localHost = GetSystemComputerName();
+
+    // Verify against both identifiers (matches either MachineGuid or ComputerName)
+    bool hwidMatches = false;
+    if (!leaseHwid.empty()) {
+        if (!localGuid.empty() && leaseHwid == localGuid) hwidMatches = true;
+        if (!localHost.empty() && (leaseHwid == localHost || leaseHwid.find(localHost) != std::string::npos || localHost.find(leaseHwid) != std::string::npos)) hwidMatches = true;
+    }
+
+    if (!hwidMatches) return false;
 
     long long expiresAt = 0;
     try { expiresAt = std::stoll(expiresAtStr); } catch (...) { return false; }
@@ -122,7 +141,7 @@ bool ValidateActiveLease() {
 }
 
 // ---------------------------------------------------------------------------
-// Native Win32 File Hooking (Descrambler in RAM)
+// Native Win32 File Hooking (Memory Descrambler)
 // ---------------------------------------------------------------------------
 
 typedef HANDLE(WINAPI* PFN_CreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -208,7 +227,6 @@ BOOL WINAPI HookedCloseHandle(HANDLE hObject) {
     return g_OriginalCloseHandle(hObject);
 }
 
-// Intercept IAT entries inside amtrucks.exe using pure standard Windows PE headers
 void InstallHooks() {
     HMODULE hExe = GetModuleHandle(NULL);
     if (!hExe) return;
@@ -258,14 +276,10 @@ void InstallHooks() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SCS Software Telemetry SDK Bindings
-// ---------------------------------------------------------------------------
-
 #define SCS_EXPORT extern "C" __declspec(dllexport)
 
 SCS_EXPORT unsigned int scs_telemetry_init(const unsigned int version, const void *const params) {
-    return 0; // SCS_RESULT_OK
+    return 0;
 }
 
 SCS_EXPORT void scs_telemetry_shutdown(void) {}
