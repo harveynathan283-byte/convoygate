@@ -21,28 +21,42 @@ jobs:
         with:
           node-version: 20
 
-      # 1. Compile C++ Plugin directly into client and admin folders
+      # 1. Compile C++ Plugin directly into client and root
       - name: Compile ATS Plugin DLL
         run: |
           cl /LD /O2 /EHsc plugin/convoygate_plugin.cpp /Fe:client/convoygate.dll /link advapi32.lib crypt32.lib user32.lib
           copy client\convoygate.dll convoygate.dll
         shell: cmd
 
-      # 2. Build Admin Dashboard GUI (.exe)
+      # 2. Build Admin Dashboard GUI (.exe) with automatic retry on 504 timeout
       - name: Build Admin Dashboard GUI
+        shell: bash
         run: |
           cd admin-dashboard
           npm install
-          npm run dist
-        shell: bash
+          for i in {1..5}; do
+            echo "Packaging Admin Dashboard (Attempt $i)..."
+            npm run dist && break || {
+              if [ $i -eq 5 ]; then exit 1; fi
+              echo "GitHub download timed out (504). Retrying in 10s..."
+              sleep 10
+            }
+          done
 
-      # 3. Build Client Launcher GUI (.exe)
+      # 3. Build Client Launcher GUI (.exe) with automatic retry on 504 timeout
       - name: Build Client Launcher GUI
+        shell: bash
         run: |
           cd client
           npm install
-          npm run dist
-        shell: bash
+          for i in {1..5}; do
+            echo "Packaging Client Launcher (Attempt $i)..."
+            npm run dist && break || {
+              if [ $i -eq 5 ]; then exit 1; fi
+              echo "GitHub download timed out (504). Retrying in 10s..."
+              sleep 10
+            }
+          done
 
       # 4. Upload Complete Executable Suite
       - name: Upload Complete Suite
