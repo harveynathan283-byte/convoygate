@@ -3,12 +3,13 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const http = require("http");
+const https = require("https");
 const { pipeline } = require("stream/promises");
 const { Transform } = require("stream");
 const axios = require("axios");
 
 let mainWindow;
-const SERVER_URL = "http://192.168.86.111:3000";
+const SERVER_URL = "https://api.convoygate.com";
 
 // ConvoyGate Static Master Cypher Seed
 const DRM_CIPHER_KEY = Buffer.from([
@@ -247,12 +248,14 @@ function streamUploadToBackend(filePath, headers, onProgress) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${SERVER_URL}/api/v1/admin/upload-stream`);
     const stat = fs.statSync(filePath);
+    const client = url.protocol === "https:" ? https : http;
 
-    const req = http.request(
+    const req = client.request(
       {
+        protocol: url.protocol,
         hostname: url.hostname,
-        port: url.port,
-        path: url.pathname,
+        port: url.port ? url.port : (url.protocol === "https:" ? 443 : 80),
+        path: url.pathname + url.search,
         method: "POST",
         headers: {
           "Content-Type": "application/octet-stream",
@@ -290,7 +293,98 @@ function streamUploadToBackend(filePath, headers, onProgress) {
   });
 }
 
+async function handleProcessAndUpload(event, arg) {
+  let inputPath = "";
+  let modId = "";
+  let name = "";
+  let version = "1.0.0";
+  let tier = "All";
+
+  if (typeof arg === "string") {
+    inputPath = arg;
+    const baseName = path.basename(inputPath).replace(/\.(scs|zip)$/i, "");
+    modId = baseName.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+    name = baseName.replace(/[_-]/g, " ");
+  } else if (arg && typeof arg === "object") {
+    inputPath = arg.inputPath || arg.filePath || "";
+    const baseName = path.basename(inputPath).replace(/\.(scs|zip)$/i, "");
+    modId = arg.modId || baseName.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+    name = arg.name || baseName.replace(/[_-]/g, " ");
+    version = arg.version || "1.0.0";
+    tier = arg.tier || "All";
+  }
+
+  let finalScsFile = null;
+
+  try {
+    const stat = fs.statSync(inputPath);
+    finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
+
+    const sendStatus = (message, percent) => {
+      event.sender.send("publish-status", { message, percent });
+    };
+
+    if (stat.isFile()) {
+      sendStatus("Encrypting 3D assets & obfuscating headers...", 0);
+      encryptAndLockScsArchive(inputPath, finalScsFile, (count) => {
+        sendStatus(`Encrypting assets: ${count} items secured...`);
+      });
+    } else {
+      sendStatus("Compiling folder into encrypted SCS archive...", 0);
+      packFolderEncrypted(inputPath, finalScsFile, (current, total) => {
+        sendStatus(`Encrypting & packing: ${current} / ${total} files...`);
+      });
+    }
+
+    sendStatus("Connecting to server stream...", 0);
+
+    const result = await streamUploadToBackend(
+      finalScsFile,
+      {
+        "x-mod-id": encodeURIComponent(modId),
+        "x-mod-name": encodeURIComponent(name),
+        "x-mod-version": encodeURIComponent(version),
+        "x-mod-tier": encodeURIComponent(tier),
+      },
+      (bytesSent, totalBytes) => {
+        const percent = Math.round((bytesSent / totalBytes) * 100);
+        const sentMB = (bytesSent / 1024 / 1024).toFixed(1);
+        const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
+
+        if (percent >= 100) {
+          sendStatus(`Upload complete (${totalMB} MB). Saving to database catalog...`, 100);
+        } else {
+          sendStatus(`Uploading: ${percent}% (${sentMB} MB / ${totalMB} MB)...`, percent);
+        }
+      }
+    );
+
+    if (fs.existsSync(finalScsFile)) {
+      fs.unlinkSync(finalScsFile);
+    }
+
+    return result;
+  } catch (err) {
+    if (finalScsFile && fs.existsSync(finalScsFile)) {
+      fs.unlinkSync(finalScsFile);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+// Support both naming conventions so the UI never breaks
+ipcMain.handle("process-and-upload", handleProcessAndUpload);
+ipcMain.handle("publish-mod", handleProcessAndUpload);
+
 ipcMain.handle("dialog-select-folder", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Uncompressed Mod Folder",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+ipcMain.handle("browse-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Select Uncompressed Mod Folder",
     properties: ["openDirectory"],
@@ -308,71 +402,19 @@ ipcMain.handle("dialog-select-file", async () => {
   if (result.canceled || !result.filePaths.length) return null;
   return result.filePaths[0];
 });
-
-ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, version, tier }) => {
-  let finalScsFile = null;
-
-  try {
-    const stat = fs.statSync(inputPath);
-    finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
-
-    if (stat.isFile()) {
-      event.sender.send("publish-status", { message: "Encrypting 3D assets & obfuscating headers...", percent: 0 });
-      encryptAndLockScsArchive(inputPath, finalScsFile, (count) => {
-        event.sender.send("publish-status", { message: `Encrypting assets: ${count} items secured...` });
-      });
-    } else {
-      event.sender.send("publish-status", { message: "Compiling folder into encrypted SCS archive...", percent: 0 });
-      packFolderEncrypted(inputPath, finalScsFile, (current, total) => {
-        event.sender.send("publish-status", { message: `Encrypting & packing: ${current} / ${total} files...` });
-      });
-    }
-
-    event.sender.send("publish-status", { message: "Connecting to server stream...", percent: 0 });
-
-    const result = await streamUploadToBackend(
-      finalScsFile,
-      {
-        "x-mod-id": encodeURIComponent(modId),
-        "x-mod-name": encodeURIComponent(name),
-        "x-mod-version": encodeURIComponent(version),
-        "x-mod-tier": encodeURIComponent(tier),
-      },
-      (bytesSent, totalBytes) => {
-        const percent = Math.round((bytesSent / totalBytes) * 100);
-        const sentMB = (bytesSent / 1024 / 1024).toFixed(1);
-        const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
-
-        if (percent >= 100) {
-          event.sender.send("publish-status", {
-            message: `Upload complete (${totalMB} MB). Saving to database catalog...`,
-            percent: 100,
-          });
-        } else {
-          event.sender.send("publish-status", {
-            message: `Uploading: ${percent}% (${sentMB} MB / ${totalMB} MB)...`,
-            percent,
-          });
-        }
-      }
-    );
-
-    if (fs.existsSync(finalScsFile)) {
-      fs.unlinkSync(finalScsFile);
-    }
-
-    return result;
-  } catch (err) {
-    if (finalScsFile && fs.existsSync(finalScsFile)) {
-      fs.unlinkSync(finalScsFile);
-    }
-    return { success: false, error: err.message };
-  }
+ipcMain.handle("browse-file", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Mod File (.scs or .zip)",
+    filters: [{ name: "Mod Archives (*.scs, *.zip)", extensions: ["scs", "zip"] }],
+    properties: ["openFile"],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
 });
 
 ipcMain.handle("fetch-catalog", async () => {
   try {
-    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 4000 });
+    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 6000 });
     return res.data;
   } catch (err) {
     return { success: false, error: err.message };
@@ -381,7 +423,7 @@ ipcMain.handle("fetch-catalog", async () => {
 
 ipcMain.handle("delete-mod", async (event, modId) => {
   try {
-    const res = await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${modId}`, { timeout: 8000 });
+    const res = await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${encodeURIComponent(modId)}`, { timeout: 8000 });
     return res.data;
   } catch (err) {
     return { success: false, error: err.message };
