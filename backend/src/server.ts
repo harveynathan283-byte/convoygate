@@ -1,17 +1,32 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import Database from "better-sqlite3";
+import axios from "axios";
+import jwt from "jsonwebtoken";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Environment & Security Config
+const SERVER_URL = process.env.SERVER_URL || "https://api.convoygate.com";
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || "cg_admin_local_fallback";
+const JWT_SECRET = process.env.JWT_SECRET || "convoygate_default_jwt_secret";
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || "";
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || "";
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID || "";
+const DISCORD_SUBSCRIBER_ROLE_ID = process.env.DISCORD_SUBSCRIBER_ROLE_ID || "";
 
 // Storage Directories
 const STORAGE_DIR = path.resolve("./storage");
@@ -75,25 +90,125 @@ if (fs.existsSync(privateKeyPath) && fs.existsSync(publicKeyPath)) {
 }
 
 // ---------------------------------------------------------------------------
-// API: Licensing
+// Middleware & Discord Verification
 // ---------------------------------------------------------------------------
-app.post("/api/v1/license/lease", (req: Request, res: Response) => {
+
+const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
+  const key = req.headers["x-admin-key"] || req.headers.authorization?.replace("Bearer ", "");
+  if (key !== ADMIN_API_KEY) {
+    return res.status(401).json({ success: false, error: "Unauthorized: Invalid admin key" });
+  }
+  next();
+};
+
+async function verifyDiscordSubscriber(discordUserId: string): Promise<boolean> {
   try {
-    const { discordId, hwid, modId } = req.body;
-    if (!hwid) {
-      return res.status(400).json({ success: false, error: "Missing required HWID." });
+    const res = await axios.get(
+      `https://discord.com/api/v10/guilds/${DISCORD_GUILD_ID}/members/${discordUserId}`,
+      { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` }, timeout: 5000 }
+    );
+    const roles: string[] = res.data.roles || [];
+    return roles.includes(DISCORD_SUBSCRIBER_ROLE_ID);
+  } catch (err: any) {
+    console.error(`[Discord Auth] Error fetching member ${discordUserId}:`, err.message);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// API: Discord Authentication Flow
+// ---------------------------------------------------------------------------
+
+app.get("/api/v1/auth/discord/login", (req: Request, res: Response) => {
+  const redirectUri = encodeURIComponent(`${SERVER_URL}/api/v1/auth/discord/callback`);
+  res.redirect(`https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=identify`);
+});
+
+app.get("/api/v1/auth/discord/callback", async (req: Request, res: Response) => {
+  const code = req.query.code as string;
+  if (!code) return res.status(400).send("No code provided.");
+
+  try {
+    // 1. Exchange code for access token
+    const tokenRes = await axios.post("https://discord.com/api/v10/oauth2/token",
+      new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: "authorization_code",
+        code: code,
+        redirect_uri: `${SERVER_URL}/api/v1/auth/discord/callback`,
+      }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+
+    // 2. Fetch User Identity
+    const userRes = await axios.get("https://discord.com/api/v10/users/@me", {
+      headers: { Authorization: `Bearer ${tokenRes.data.access_token}` }
+    });
+    const user = userRes.data;
+
+    // 3. Verify they are currently a subscriber
+    const isSub = await verifyDiscordSubscriber(user.id);
+    if (!isSub) {
+      return res.send(`
+        <html><body style="background:#0d0f17;color:#f87171;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
+          <div style="text-align:center;">
+            <h2>Access Denied</h2>
+            <p>Your Discord account does not have the active subscriber role.</p>
+          </div>
+        </body></html>
+      `);
     }
 
-    const userId = discordId 
-      ? `usr_${crypto.createHash("md5").update(discordId).digest("hex").substring(0, 12)}`
-      : "usr_guest_subscriber";
+    // 4. Issue JWT and redirect to a success route the Electron app is listening for
+    const sessionToken = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "30d" });
+    res.redirect(`/api/v1/auth/discord/success?token=${sessionToken}&username=${encodeURIComponent(user.username)}`);
 
+  } catch (err: any) {
+    res.status(500).send("Discord authentication failed.");
+  }
+});
+
+// Dummy route for Electron to intercept
+app.get("/api/v1/auth/discord/success", (req: Request, res: Response) => {
+  res.send(`
+    <html><body style="background:#0d0f17;color:#52b788;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
+      <div style="text-align:center;">
+        <h2>Authentication Successful</h2>
+        <p>You can now return to the ConvoyGate Launcher.</p>
+      </div>
+    </body></html>
+  `);
+});
+
+// ---------------------------------------------------------------------------
+// API: Licensing (Requires JWT & Live Discord Role)
+// ---------------------------------------------------------------------------
+
+app.post("/api/v1/license/lease", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: "Missing session token." });
+    
+    const token = authHeader.replace("Bearer ", "");
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+
+    // Live subscription check (Revokes access immediately if they stopped paying)
+    const isSub = await verifyDiscordSubscriber(decoded.id);
+    if (!isSub) {
+      return res.status(403).json({ success: false, error: "Subscription expired or canceled." });
+    }
+
+    const { hwid, modId } = req.body;
+    if (!hwid) return res.status(400).json({ success: false, error: "Missing required HWID." });
+
+    const userId = `usr_${decoded.id}`;
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + (30 * 24 * 60 * 60);
 
     const payload = {
       userId,
-      hwid,
+      hwid: hwid.toLowerCase().trim(),
       modId: modId || "all-access",
       issuedAt: now,
       expiresAt,
@@ -108,14 +223,11 @@ app.post("/api/v1/license/lease", (req: Request, res: Response) => {
     db.prepare(`
       INSERT INTO leases (id, user_id, hwid, mod_id, issued_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(leaseId, userId, hwid, modId || "all-access", now, expiresAt);
+    `).run(leaseId, userId, hwid, payload.modId, now, expiresAt);
 
-    return res.json({
-      success: true,
-      lease: { data: dataBase64, signature: signatureBase64 },
-    });
+    return res.json({ success: true, lease: { data: dataBase64, signature: signatureBase64 } });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(401).json({ success: false, error: "Invalid or expired session. Please log in again." });
   }
 });
 
@@ -131,80 +243,66 @@ app.get("/api/v1/mods", (_req: Request, res: Response) => {
   }
 });
 
-// High-speed binary upload handler with stream pipeline
-app.post("/api/v1/admin/upload-stream", async (req: Request, res: Response) => {
-  const modId = decodeURIComponent((req.headers["x-mod-id"] as string) || (req.query.modId as string) || "");
-  const name = decodeURIComponent((req.headers["x-mod-name"] as string) || (req.query.name as string) || modId);
-  const version = decodeURIComponent((req.headers["x-mod-version"] as string) || (req.query.version as string) || "1.0.0");
-  const tier = decodeURIComponent((req.headers["x-mod-tier"] as string) || (req.query.tier as string) || "All");
+app.post("/api/v1/admin/upload-stream", requireAdmin, async (req: Request, res: Response) => {
+  const modId = decodeURIComponent((req.headers["x-mod-id"] as string) || "");
+  const name = decodeURIComponent((req.headers["x-mod-name"] as string) || modId);
+  const version = decodeURIComponent((req.headers["x-mod-version"] as string) || "1.0.0");
+  const tier = decodeURIComponent((req.headers["x-mod-tier"] as string) || "All");
 
-  if (!modId) {
-    return res.status(400).json({ success: false, error: "Missing mod identifier." });
-  }
+  if (!modId) return res.status(400).json({ success: false, error: "Missing mod identifier." });
 
   const finalPath = path.join(DIST_DIR, `${modId}.scs`);
   const tempPath = path.join(TEMP_DIR, `${Date.now()}_${modId}.scs`);
   const writeStream = fs.createWriteStream(tempPath);
 
   try {
-    // Pipeline waits until all bytes are flushed and the file descriptor is closed
     await pipeline(req, writeStream);
-
-    if (fs.existsSync(finalPath)) {
-      fs.unlinkSync(finalPath);
-    }
+    if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
     fs.renameSync(tempPath, finalPath);
 
     const fileSize = fs.statSync(finalPath).size;
     const updatedAt = Math.floor(Date.now() / 1000);
 
-    const stmt = db.prepare(`
+    db.prepare(`
       INSERT INTO mods (id, name, version, tier, file_size, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        version = excluded.version,
-        tier = excluded.tier,
-        file_size = excluded.file_size,
-        updated_at = excluded.updated_at
-    `);
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, version=excluded.version, tier=excluded.tier, file_size=excluded.file_size, updated_at=excluded.updated_at
+    `).run(modId, name, version, tier, fileSize, updatedAt);
 
-    stmt.run(modId, name, version, tier, fileSize, updatedAt);
-
-    console.log(`[Admin] Mod saved to catalog: ${name} (${modId}) - ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`[Admin] Mod saved: ${name} (${(fileSize / 1024 / 1024).toFixed(2)} MB)`);
     return res.json({ success: true, modId, fileSize, name });
   } catch (err: any) {
-    console.error("[Upload Error]:", err);
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.delete("/api/v1/admin/mods/:id", (req: Request, res: Response) => {
+app.delete("/api/v1/admin/mods/:id", requireAdmin, (req: Request, res: Response) => {
   try {
     const modId = req.params.id;
     const filePath = path.join(DIST_DIR, `${modId}.scs`);
-
     db.prepare("DELETE FROM mods WHERE id = ?").run(modId);
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-
-    console.log(`[Admin] Deleted mod: ${modId}`);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     return res.json({ success: true, modId });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.get("/api/v1/client/download/:modId", (req: Request, res: Response) => {
+// Download Route (Requires JWT & Valid Role)
+app.get("/api/v1/client/download/:modId", async (req: Request, res: Response) => {
   try {
+    const token = (req.query.token as string) || req.headers.authorization?.replace("Bearer ", "");
+    if (!token) return res.status(401).json({ success: false, error: "Missing session token." });
+
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const isSub = await verifyDiscordSubscriber(decoded.id);
+    if (!isSub) return res.status(403).json({ success: false, error: "Active subscription required to download files." });
+
     const modId = req.params.modId;
     const filePath = path.join(DIST_DIR, `${modId}.scs`);
 
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, error: `Mod package not found for: ${modId}` });
-    }
+    if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, error: "Mod package missing on server." });
 
     const stat = fs.statSync(filePath);
     res.writeHead(200, {
@@ -212,21 +310,12 @@ app.get("/api/v1/client/download/:modId", (req: Request, res: Response) => {
       "Content-Length": stat.size,
       "Content-Disposition": `attachment; filename="${modId}.scs"`,
     });
-
-    const readStream = fs.createReadStream(filePath);
-    readStream.pipe(res);
+    fs.createReadStream(filePath).pipe(res);
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(403).json({ success: false, error: "Invalid session. Please relogin." });
   }
 });
 
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`\n==================================================`);
-  console.log(` ConvoyGate Command Center running on port: ${PORT}`);
-  console.log(` Local Network Access: http://192.168.86.111:${PORT}`);
-  console.log(`==================================================\n`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`ConvoyGate Hub online on port ${PORT}`);
 });
-
-server.timeout = 0;
-server.keepAliveTimeout = 120000;
-server.headersTimeout = 125000;
