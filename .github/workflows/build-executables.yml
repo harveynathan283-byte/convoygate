@@ -21,10 +21,10 @@ jobs:
         with:
           node-version: 20
 
-      # 1. Compile C++ Plugin with memory hook libraries
+      # 1. Compile C++ Plugin to convoygate.dll (Standard Win32 API)
       - name: Compile ATS Plugin DLL
         run: |
-          cl /LD /O2 /EHsc plugin/convoygate_plugin.cpp /Fe:convoygate.dll /link advapi32.lib bcrypt.lib crypt32.lib user32.lib imagehlp.lib
+          cl /LD /O2 /EHsc plugin/convoygate_plugin.cpp /Fe:convoygate.dll /link advapi32.lib crypt32.lib user32.lib
 
       # 2. Build Admin Dashboard GUI (.exe)
       - name: Build Admin Dashboard GUI

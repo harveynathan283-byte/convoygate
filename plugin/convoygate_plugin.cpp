@@ -150,7 +150,6 @@ HANDLE WINAPI HookedCreateFileW(
 
     if (hFile != INVALID_HANDLE_VALUE && lpFileName != NULL) {
         std::wstring ws(lpFileName);
-        // Identify SCS packages being loaded from the mod directory
         if (ws.find(L"\\mod\\") != std::wstring::npos && ws.find(L".scs") != std::wstring::npos) {
             EnterCriticalSection(&g_HandleLock);
             g_ProtectedHandles[hFile] = true;
@@ -167,7 +166,6 @@ BOOL WINAPI HookedReadFile(
     LPDWORD lpNumberOfBytesRead,
     LPOVERLAPPED lpOverlapped
 ) {
-    // Save current file pointer offset before read
     LARGE_INTEGER offsetBefore;
     offsetBefore.QuadPart = 0;
     if (lpOverlapped == NULL) {
@@ -189,13 +187,11 @@ BOOL WINAPI HookedReadFile(
         }
         LeaveCriticalSection(&g_HandleLock);
 
-        // If active lease is valid, decrypt the stream in memory for ATS!
         if (isProtected && g_bLeaseValid) {
             unsigned char* buf = reinterpret_cast<unsigned char*>(lpBuffer);
             DWORD bytesRead = *lpNumberOfBytesRead;
             long long startPos = offsetBefore.QuadPart;
 
-            // Apply XOR descrambler to reconstruct 3D models and textures
             for (DWORD i = 0; i < bytesRead; i++) {
                 buf[i] ^= DRM_CIPHER_KEY[(startPos + i) % sizeof(DRM_CIPHER_KEY)] ^ ((startPos + i) & 0xFF);
             }
@@ -212,15 +208,21 @@ BOOL WINAPI HookedCloseHandle(HANDLE hObject) {
     return g_OriginalCloseHandle(hObject);
 }
 
-// Intercept IAT entries inside amtrucks.exe
+// Intercept IAT entries inside amtrucks.exe using pure standard Windows PE headers
 void InstallHooks() {
     HMODULE hExe = GetModuleHandle(NULL);
     if (!hExe) return;
 
-    ULONG size = 0;
-    PIMAGE_IMPORT_DESCRIPTOR pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)
-        ImageDirectoryEntryToData(hExe, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &size);
-    if (!pImportDesc) return;
+    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hExe;
+    if (pDosHeader->e_magic != IMAGE_DOS_SIGNATURE) return;
+
+    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((PBYTE)hExe + pDosHeader->e_lfanew);
+    if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE) return;
+
+    DWORD importRva = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!importRva) return;
+
+    PIMAGE_IMPORT_DESCRIPTOR pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)((PBYTE)hExe + importRva);
 
     for (; pImportDesc->Name; pImportDesc++) {
         const char* pszModName = (const char*)((PBYTE)hExe + pImportDesc->Name);
@@ -276,7 +278,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         g_bLeaseValid = ValidateActiveLease();
 
-        // If the key is missing or belongs to another PC, terminate startup
         if (!g_bLeaseValid) {
             MessageBoxA(
                 NULL,
@@ -290,7 +291,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             return FALSE;
         }
 
-        // Install the memory descrambler for protected mods
         InstallHooks();
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         DeleteCriticalSection(&g_HandleLock);
