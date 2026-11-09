@@ -3,12 +3,12 @@ import cors from "cors";
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { pipeline } from "node:stream/promises";
 import Database from "better-sqlite3";
 
 const app = express();
 const PORT = 3000;
 
-// Enable CORS and JSON parsing
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -53,7 +53,7 @@ db.exec(`
   );
 `);
 
-// Ed25519 Cryptographic Keys for Lease Signing
+// Cryptographic Keys for Lease Signing
 const privateKeyPath = path.join(KEYS_DIR, "ed25519_private.pem");
 const publicKeyPath = path.join(KEYS_DIR, "ed25519_public.pem");
 
@@ -80,7 +80,6 @@ if (fs.existsSync(privateKeyPath) && fs.existsSync(publicKeyPath)) {
 app.post("/api/v1/license/lease", (req: Request, res: Response) => {
   try {
     const { discordId, hwid, modId } = req.body;
-
     if (!hwid) {
       return res.status(400).json({ success: false, error: "Missing required HWID." });
     }
@@ -102,7 +101,6 @@ app.post("/api/v1/license/lease", (req: Request, res: Response) => {
 
     const dataJson = JSON.stringify(payload);
     const dataBase64 = Buffer.from(dataJson).toString("base64");
-
     const signatureBuffer = crypto.sign(null, Buffer.from(dataBase64), privateKey);
     const signatureBase64 = signatureBuffer.toString("base64");
 
@@ -112,17 +110,11 @@ app.post("/api/v1/license/lease", (req: Request, res: Response) => {
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(leaseId, userId, hwid, modId || "all-access", now, expiresAt);
 
-    console.log(`[License] Issued 30-day lease for HWID: ${hwid} (${userId})`);
-
     return res.json({
       success: true,
-      lease: {
-        data: dataBase64,
-        signature: signatureBase64,
-      },
+      lease: { data: dataBase64, signature: signatureBase64 },
     });
   } catch (err: any) {
-    console.error("[Lease Error]:", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -139,65 +131,53 @@ app.get("/api/v1/mods", (_req: Request, res: Response) => {
   }
 });
 
-// High-speed direct binary upload endpoint (Impervious to ECONNRESET)
-app.post("/api/v1/admin/upload-stream", (req: Request, res: Response) => {
+// High-speed binary upload handler with stream pipeline
+app.post("/api/v1/admin/upload-stream", async (req: Request, res: Response) => {
   const modId = decodeURIComponent((req.headers["x-mod-id"] as string) || (req.query.modId as string) || "");
   const name = decodeURIComponent((req.headers["x-mod-name"] as string) || (req.query.name as string) || modId);
   const version = decodeURIComponent((req.headers["x-mod-version"] as string) || (req.query.version as string) || "1.0.0");
   const tier = decodeURIComponent((req.headers["x-mod-tier"] as string) || (req.query.tier as string) || "All");
 
   if (!modId) {
-    return res.status(400).json({ success: false, error: "Missing x-mod-id header." });
+    return res.status(400).json({ success: false, error: "Missing mod identifier." });
   }
 
   const finalPath = path.join(DIST_DIR, `${modId}.scs`);
   const tempPath = path.join(TEMP_DIR, `${Date.now()}_${modId}.scs`);
   const writeStream = fs.createWriteStream(tempPath);
 
-  req.pipe(writeStream);
+  try {
+    // Pipeline waits until all bytes are flushed and the file descriptor is closed
+    await pipeline(req, writeStream);
 
-  writeStream.on("finish", () => {
-    try {
-      if (fs.existsSync(finalPath)) {
-        fs.unlinkSync(finalPath);
-      }
-      fs.renameSync(tempPath, finalPath);
-
-      const fileSize = fs.statSync(finalPath).size;
-      const updatedAt = Math.floor(Date.now() / 1000);
-
-      const stmt = db.prepare(`
-        INSERT INTO mods (id, name, version, tier, file_size, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          name = excluded.name,
-          version = excluded.version,
-          tier = excluded.tier,
-          file_size = excluded.file_size,
-          updated_at = excluded.updated_at
-      `);
-
-      stmt.run(modId, name, version, tier, fileSize, updatedAt);
-
-      console.log(`[Admin] Mod saved to catalog: ${name} (${modId}) - ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
-      return res.json({ success: true, modId, fileSize });
-    } catch (err: any) {
-      console.error("[Save Error]:", err);
-      return res.status(500).json({ success: false, error: err.message });
+    if (fs.existsSync(finalPath)) {
+      fs.unlinkSync(finalPath);
     }
-  });
+    fs.renameSync(tempPath, finalPath);
 
-  writeStream.on("error", (err) => {
-    console.error("[Write Stream Error]:", err);
+    const fileSize = fs.statSync(finalPath).size;
+    const updatedAt = Math.floor(Date.now() / 1000);
+
+    const stmt = db.prepare(`
+      INSERT INTO mods (id, name, version, tier, file_size, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        version = excluded.version,
+        tier = excluded.tier,
+        file_size = excluded.file_size,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(modId, name, version, tier, fileSize, updatedAt);
+
+    console.log(`[Admin] Mod saved to catalog: ${name} (${modId}) - ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
+    return res.json({ success: true, modId, fileSize, name });
+  } catch (err: any) {
+    console.error("[Upload Error]:", err);
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
     return res.status(500).json({ success: false, error: err.message });
-  });
-
-  req.on("error", (err) => {
-    console.error("[Upload Network Error]:", err);
-    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-    return res.status(500).json({ success: false, error: err.message });
-  });
+  }
 });
 
 app.delete("/api/v1/admin/mods/:id", (req: Request, res: Response) => {
@@ -206,7 +186,6 @@ app.delete("/api/v1/admin/mods/:id", (req: Request, res: Response) => {
     const filePath = path.join(DIST_DIR, `${modId}.scs`);
 
     db.prepare("DELETE FROM mods WHERE id = ?").run(modId);
-
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
@@ -241,11 +220,10 @@ app.get("/api/v1/client/download/:modId", (req: Request, res: Response) => {
   }
 });
 
-// Bind to 0.0.0.0 and disable socket timeouts so large transfers never disconnect
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`\n==================================================`);
   console.log(` ConvoyGate Command Center running on port: ${PORT}`);
-  console.log(` Windows Client Access: http://192.168.86.111:${PORT}`);
+  console.log(` Local Network Access: http://192.168.86.111:${PORT}`);
   console.log(`==================================================\n`);
 });
 

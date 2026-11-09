@@ -129,7 +129,6 @@
       letter-spacing: 0.05em;
     }
 
-    /* Modal Overlay */
     .modal-overlay {
       display: none;
       position: fixed;
@@ -360,7 +359,7 @@
 
       if (ext.toLowerCase() === ".scs") {
         directUploadContainer.style.display = "flex";
-        modalDirectUpload.checked = true;
+        modalDirectUpload.checked = false;
       } else {
         directUploadContainer.style.display = "none";
         modalDirectUpload.checked = false;
