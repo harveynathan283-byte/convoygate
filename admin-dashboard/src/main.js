@@ -10,24 +10,6 @@ const axios = require("axios");
 let mainWindow;
 const SERVER_URL = "http://192.168.86.111:3000";
 
-// Fast CRC32 Table
-const CRC_TABLE = new Uint32Array(256);
-for (let i = 0; i < 256; i++) {
-  let c = i >>> 0;
-  for (let k = 0; k < 8; k++) {
-    c = (c & 1) ? ((0xEDB88320 ^ (c >>> 1)) >>> 0) : (c >>> 1);
-  }
-  CRC_TABLE[i] = c >>> 0;
-}
-
-function calculateCrc32(buf) {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < buf.length; i++) {
-    crc = CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1060,
@@ -47,8 +29,27 @@ function createWindow() {
 
 app.whenReady().then(createWindow);
 
-// Instant In-Place ZIP/SCS Header Obfuscator (0.05 seconds, no extraction)
-function lockExistingArchiveFast(inputPath, outputPath) {
+// Fast CRC32 Table
+const CRC_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i >>> 0;
+  for (let k = 0; k < 8; k++) {
+    c = (c & 1) ? ((0xEDB88320 ^ (c >>> 1)) >>> 0) : (c >>> 1);
+  }
+  CRC_TABLE[i] = c >>> 0;
+}
+
+function calculateCrc32(buf) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Scrambles BOTH Central Directory AND Local File Headers
+// Makes WinRAR, 7-Zip, and Windows Explorer fail while ATS mounts natively
+function lockArchiveCompletely(inputPath, outputPath, onProgress) {
   fs.copyFileSync(inputPath, outputPath);
 
   const fd = fs.openSync(outputPath, "r+");
@@ -79,20 +80,45 @@ function lockExistingArchiveFast(inputPath, outputPath) {
   fs.readSync(fd, cdBuf, 0, cdSize, cdOffset);
 
   let pos = 0;
+  let fileCount = 0;
+
   while (pos < cdSize) {
     if (cdBuf.readUInt32LE(pos) !== 0x02014b50) break;
-    // Set Version Needed to 9.9
-    cdBuf.writeUInt16LE(99, pos + 6);
-    // Set Encrypted Flag (Bit 0)
+
+    // 1. Scramble Central Directory Entry
+    cdBuf.writeUInt16LE(99, pos + 6);          // Version needed: 9.9
     const flags = cdBuf.readUInt16LE(pos + 8);
-    cdBuf.writeUInt16LE(flags | 0x0001, pos + 8);
+    cdBuf.writeUInt16LE(flags | 0x0001, pos + 8); // Bit 0: Encrypted flag
+    cdBuf.writeUInt32LE(0xDEADBEEF, pos + 16);   // Scrambled CRC32
+
+    // 2. Locate and Scramble the Matching Local File Header (LFH)
+    const lfhOffset = cdBuf.readUInt32LE(pos + 42);
+    const lfhCheck = Buffer.alloc(4);
+    fs.readSync(fd, lfhCheck, 0, 4, lfhOffset);
+
+    if (lfhCheck.readUInt32LE(0) === 0x04034b50) {
+      const lfhPatch = Buffer.alloc(26);
+      fs.readSync(fd, lfhPatch, 0, 26, lfhOffset + 4);
+
+      lfhPatch.writeUInt16LE(99, 0);                 // LFH Version: 9.9
+      lfhPatch.writeUInt16LE(flags | 0x0001, 2);     // LFH Flag: Encrypted
+      lfhPatch.writeUInt32LE(0xDEADBEEF, 10);        // LFH CRC32: Scrambled
+
+      fs.writeSync(fd, lfhPatch, 0, 26, lfhOffset + 4);
+    }
 
     const nameLen = cdBuf.readUInt16LE(pos + 28);
     const extraLen = cdBuf.readUInt16LE(pos + 30);
     const commentLen = cdBuf.readUInt16LE(pos + 32);
     pos += 46 + nameLen + extraLen + commentLen;
+    fileCount++;
+
+    if (onProgress && fileCount % 150 === 0) {
+      onProgress(fileCount);
+    }
   }
 
+  // Write modified Central Directory back to disk
   fs.writeSync(fd, cdBuf, 0, cdSize, cdOffset);
   fs.closeSync(fd);
 }
@@ -124,21 +150,19 @@ function packFolderToScs(sourceFolder, outputPath, onProgress) {
     const item = files[i];
     const fileBuf = fs.readFileSync(item.full);
     const nameBuf = Buffer.from(item.rel, "utf8");
-    const crc = calculateCrc32(fileBuf);
     const size = fileBuf.length;
 
-    if (onProgress && i % 100 === 0) {
-      onProgress(i + 1, files.length);
-    }
+    if (onProgress && i % 100 === 0) onProgress(i + 1, files.length);
 
+    // LFH: Version 9.9, encrypted bit set, scrambled CRC
     const lfh = Buffer.alloc(30);
     lfh.writeUInt32LE(0x04034b50, 0);
-    lfh.writeUInt16LE(20, 4);
-    lfh.writeUInt16LE(0, 6);
+    lfh.writeUInt16LE(99, 4);
+    lfh.writeUInt16LE(0x0001, 6);
     lfh.writeUInt16LE(0, 8);
     lfh.writeUInt16LE(0, 10);
     lfh.writeUInt16LE(0, 12);
-    lfh.writeUInt32LE(crc, 14);
+    lfh.writeUInt32LE(0xDEADBEEF, 14);
     lfh.writeUInt32LE(size, 18);
     lfh.writeUInt32LE(size, 22);
     lfh.writeUInt16LE(nameBuf.length, 26);
@@ -161,7 +185,7 @@ function packFolderToScs(sourceFolder, outputPath, onProgress) {
     cd.writeUInt16LE(0, 10);
     cd.writeUInt16LE(0, 12);
     cd.writeUInt16LE(0, 14);
-    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(0xDEADBEEF, 16);
     cd.writeUInt32LE(size, 20);
     cd.writeUInt32LE(size, 24);
     cd.writeUInt16LE(nameBuf.length, 28);
@@ -198,7 +222,6 @@ function packFolderToScs(sourceFolder, outputPath, onProgress) {
   fs.closeSync(outFd);
 }
 
-// Pipeline-based stream upload with precise network accounting
 function streamUploadToBackend(filePath, headers, onProgress) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${SERVER_URL}/api/v1/admin/upload-stream`);
@@ -265,25 +288,23 @@ ipcMain.handle("dialog-select-file", async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, version, tier, directUpload }) => {
+// Enforces full archive obfuscation on EVERY file (no bypass)
+ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, version, tier }) => {
   let finalScsFile = null;
 
   try {
     const stat = fs.statSync(inputPath);
+    finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
 
-    if (directUpload && stat.isFile() && inputPath.toLowerCase().endsWith(".scs")) {
-      finalScsFile = inputPath;
-    } else if (stat.isFile()) {
-      // Instant archive lock without unpacking
-      event.sender.send("publish-status", { message: "Locking archive headers (in-place)...", percent: 0 });
-      finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
-      lockExistingArchiveFast(inputPath, finalScsFile);
+    if (stat.isFile()) {
+      event.sender.send("publish-status", { message: "Scrambling archive headers & encrypting bit flags...", percent: 0 });
+      lockArchiveCompletely(inputPath, finalScsFile, (count) => {
+        event.sender.send("publish-status", { message: `Scrambling file headers: ${count} items locked...` });
+      });
     } else {
-      // Pack raw folder
       event.sender.send("publish-status", { message: "Packing folder into protected SCS archive...", percent: 0 });
-      finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
       packFolderToScs(inputPath, finalScsFile, (current, total) => {
-        event.sender.send("publish-status", { message: `Packing assets: ${current} / ${total} files...` });
+        event.sender.send("publish-status", { message: `Packing & locking: ${current} / ${total} files...` });
       });
     }
 
@@ -304,7 +325,7 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
 
         if (percent >= 100) {
           event.sender.send("publish-status", {
-            message: `Upload complete (${totalMB} MB). Finalizing on server & cataloging...`,
+            message: `Upload complete (${totalMB} MB). Saving to database catalog...`,
             percent: 100,
           });
         } else {
@@ -316,13 +337,13 @@ ipcMain.handle("process-and-upload", async (event, { inputPath, modId, name, ver
       }
     );
 
-    if (finalScsFile !== inputPath && fs.existsSync(finalScsFile)) {
+    if (fs.existsSync(finalScsFile)) {
       fs.unlinkSync(finalScsFile);
     }
 
     return result;
   } catch (err) {
-    if (finalScsFile && finalScsFile !== inputPath && fs.existsSync(finalScsFile)) {
+    if (finalScsFile && fs.existsSync(finalScsFile)) {
       fs.unlinkSync(finalScsFile);
     }
     return { success: false, error: err.message };

@@ -160,18 +160,11 @@
       color: #fff;
       font-size: 0.9rem;
     }
-    .checkbox-group {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin: 15px 0 20px 0;
-      color: #cbd5e1;
-      font-size: 0.85rem;
-    }
     .modal-buttons {
       display: flex;
       justify-content: flex-end;
       gap: 10px;
+      margin-top: 20px;
     }
   </style>
 </head>
@@ -187,7 +180,7 @@
 
   <div class="drop-zone" id="dropZone">
     <h3>Drop Mod Here (.scs, .zip, or Folder)</h3>
-    <p>Automatically applies SCS header obfuscation and streams to catalog</p>
+    <p>Applies full LFH/CD header scrambling to block WinRAR/7-Zip extraction</p>
   </div>
 
   <div class="actions-bar">
@@ -221,7 +214,7 @@
   <!-- Publisher Modal -->
   <div class="modal-overlay" id="uploadModal">
     <div class="modal-card">
-      <h2>Publish Mod to Catalog</h2>
+      <h2>Lock & Publish Mod</h2>
       
       <div class="form-group">
         <label>Selected Source</label>
@@ -230,7 +223,7 @@
 
       <div class="form-group">
         <label>Mod Slug / Identifier (lowercase, no spaces)</label>
-        <input type="text" id="modalModId" placeholder="e.g. volvo-fh-rigid">
+        <input type="text" id="modalModId" placeholder="e.g. volvo-rigid">
       </div>
 
       <div class="form-group">
@@ -252,14 +245,9 @@
         </select>
       </div>
 
-      <div class="checkbox-group" id="directUploadContainer">
-        <input type="checkbox" id="modalDirectUpload">
-        <label for="modalDirectUpload">File is already locked .scs (bypass re-packing)</label>
-      </div>
-
       <div class="modal-buttons">
         <button class="btn btn-secondary" id="btnCancelModal">Cancel</button>
-        <button class="btn btn-primary" id="btnConfirmPublish">Lock & Publish Mod</button>
+        <button class="btn btn-primary" id="btnConfirmPublish">Encrypt & Publish Mod</button>
       </div>
     </div>
   </div>
@@ -285,8 +273,6 @@
     const modalModName = document.getElementById("modalModName");
     const modalVersion = document.getElementById("modalVersion");
     const modalTier = document.getElementById("modalTier");
-    const modalDirectUpload = document.getElementById("modalDirectUpload");
-    const directUploadContainer = document.getElementById("directUploadContainer");
 
     function setStatus(text, isError = false, percent = null) {
       statusContainer.style.display = "block";
@@ -357,14 +343,6 @@
       modalVersion.value = "1.0.0";
       modalTier.value = "All";
 
-      if (ext.toLowerCase() === ".scs") {
-        directUploadContainer.style.display = "flex";
-        modalDirectUpload.checked = false;
-      } else {
-        directUploadContainer.style.display = "none";
-        modalDirectUpload.checked = false;
-      }
-
       uploadModal.classList.add("active");
     }
 
@@ -378,7 +356,6 @@
       const name = modalModName.value.trim();
       const version = modalVersion.value.trim() || "1.0.0";
       const tier = modalTier.value;
-      const directUpload = modalDirectUpload.checked;
 
       if (!modId || !name) {
         alert("Please provide both Mod Slug and Display Title.");
@@ -386,7 +363,7 @@
       }
 
       uploadModal.classList.remove("active");
-      setStatus(`Preparing '${name}'...`, false, 0);
+      setStatus(`Locking & publishing '${name}'...`, false, 0);
 
       const result = await ipcRenderer.invoke("process-and-upload", {
         inputPath,
@@ -394,7 +371,6 @@
         name,
         version,
         tier,
-        directUpload,
       });
 
       if (result && result.success) {

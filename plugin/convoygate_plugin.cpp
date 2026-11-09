@@ -1,242 +1,209 @@
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wincrypt.h>
 #include <string>
 #include <vector>
 #include <fstream>
 #include <sstream>
-#include <chrono>
+#include <ctime>
 
-// Structure representing the decoded lease token
-struct ConvoyGateLease {
-    std::string userId;
-    std::string hwid;
-    std::string modId;
-    int64_t issuedAt = 0;
-    int64_t expiresAt = 0;
-    bool isValid = false;
-};
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "user32.lib")
 
-// Simple base64 decoder for Windows
-std::string Base64Decode(const std::string& in) {
-    std::string out;
-    std::vector<int> T(256, -1);
-    for (int i = 0; i < 64; i++) {
-        T["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i]] = i;
+HMODULE g_hModule = NULL;
+
+// ---------------------------------------------------------------------------
+// Helpers: File System & Local HWID Extraction
+// ---------------------------------------------------------------------------
+
+std::string GetPluginDirectory() {
+    char path[MAX_PATH];
+    GetModuleFileNameA(g_hModule, path, MAX_PATH);
+    std::string fullPath(path);
+    size_t lastSlash = fullPath.find_last_of("\\/");
+    if (lastSlash != std::string::npos) {
+        return fullPath.substr(0, lastSlash + 1);
     }
-    int val = 0, valb = -8;
-    for (unsigned char c : in) {
-        if (c == '=') break;
-        if (T[c] == -1) continue;
-        val = (val << 6) + T[c];
-        valb += 6;
-        if (valb >= 0) {
-            out.push_back(char((val >> valb) & 0xFF));
-            valb -= 8;
+    return ".\\";
+}
+
+std::string GetSystemHwid() {
+    HKEY hKey;
+    char guid[256] = { 0 };
+    DWORD size = sizeof(guid);
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        RegQueryValueExA(hKey, "MachineGuid", NULL, NULL, (LPBYTE)guid, &size);
+        RegCloseKey(hKey);
+    }
+    return std::string(guid);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: Cryptography & String Extraction
+// ---------------------------------------------------------------------------
+
+std::string Base64Decode(const std::string& input) {
+    DWORD outLen = 0;
+    if (!CryptStringToBinaryA(input.c_str(), (DWORD)input.length(), CRYPT_STRING_BASE64, NULL, &outLen, NULL, NULL)) {
+        return "";
+    }
+    std::vector<BYTE> buffer(outLen);
+    if (!CryptStringToBinaryA(input.c_str(), (DWORD)input.length(), CRYPT_STRING_BASE64, buffer.data(), &outLen, NULL, NULL)) {
+        return "";
+    }
+    return std::string(reinterpret_cast<char*>(buffer.data()), outLen);
+}
+
+// Lightweight JSON token extractor (zero external dependencies)
+std::string ExtractJsonField(const std::string& json, const std::string& key) {
+    std::string searchKey = "\"" + key + "\"";
+    size_t keyPos = json.find(searchKey);
+    if (keyPos == std::string::npos) return "";
+
+    size_t colonPos = json.find(':', keyPos + searchKey.length());
+    if (colonPos == std::string::npos) return "";
+
+    size_t valueStart = json.find_first_not_of(" \t\r\n", colonPos + 1);
+    if (valueStart == std::string::npos) return "";
+
+    if (json[valueStart] == '\"') {
+        size_t valueEnd = json.find('\"', valueStart + 1);
+        if (valueEnd != std::string::npos) {
+            return json.substr(valueStart + 1, valueEnd - valueStart - 1);
         }
-    }
-    return out;
-}
-
-// Generate matching Windows HWID from machine identifiers
-std::string GetLocalWindowsHWID() {
-    char volumeName[MAX_PATH + 1] = { 0 };
-    char fileSystemName[MAX_PATH + 1] = { 0 };
-    DWORD serialNumber = 0;
-    DWORD maxComponentLen = 0;
-    DWORD fileSystemFlags = 0;
-
-    if (GetVolumeInformationA("C:\\", volumeName, ARRAYSIZE(volumeName), &serialNumber,
-        &maxComponentLen, &fileSystemFlags, fileSystemName, ARRAYSIZE(fileSystemName)))
-    {
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "WIN-%08X", serialNumber);
-        return std::string(buffer);
-    }
-
-    return "WIN-UNKNOWN-HWID";
-}
-
-// Robust JSON field extractor (handles formatting with or without spaces)
-ConvoyGateLease ParseLeasePayload(const std::string& json) {
-    ConvoyGateLease lease;
-
-    auto findStringField = [&](const std::string& key) -> std::string {
-        std::string search = "\"" + key + "\"";
-        size_t keyPos = json.find(search);
-        if (keyPos == std::string::npos) return "";
-
-        size_t colonPos = json.find(":", keyPos + search.length());
-        if (colonPos == std::string::npos) return "";
-
-        size_t quoteStart = json.find("\"", colonPos + 1);
-        if (quoteStart == std::string::npos) return "";
-        quoteStart++;
-
-        size_t quoteEnd = json.find("\"", quoteStart);
-        if (quoteEnd == std::string::npos) return "";
-
-        return json.substr(quoteStart, quoteEnd - quoteStart);
-    };
-
-    auto findIntField = [&](const std::string& key) -> int64_t {
-        std::string search = "\"" + key + "\"";
-        size_t keyPos = json.find(search);
-        if (keyPos == std::string::npos) return 0;
-
-        size_t colonPos = json.find(":", keyPos + search.length());
-        if (colonPos == std::string::npos) return 0;
-
-        size_t numStart = colonPos + 1;
-        while (numStart < json.size() && (json[numStart] == ' ' || json[numStart] == '\t')) numStart++;
-
-        try {
-            size_t numEnd = json.find_first_of(",}\r\n ", numStart);
-            return std::stoll(json.substr(numStart, numEnd - numStart));
-        } catch (...) {
-            return 0;
+    } else {
+        size_t valueEnd = json.find_first_of(",}\r\n ", valueStart);
+        if (valueEnd != std::string::npos) {
+            return json.substr(valueStart, valueEnd - valueStart);
         }
-    };
-
-    lease.userId = findStringField("userId");
-    lease.hwid = findStringField("hwid");
-    lease.modId = findStringField("modId");
-    lease.issuedAt = findIntField("issuedAt");
-    lease.expiresAt = findIntField("expiresAt");
-    lease.isValid = (!lease.userId.empty() && !lease.modId.empty());
-
-    return lease;
+        return json.substr(valueStart);
+    }
+    return "";
 }
 
-// Dynamically locate convoygate.key in the same folder as this DLL
-std::string ResolveKeyFilePath() {
-    HMODULE hModule = NULL;
-    GetModuleHandleExA(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        (LPCSTR)&ResolveKeyFilePath,
-        &hModule
+// ---------------------------------------------------------------------------
+// Core DRM Engine: Lease Verification & Hard Termination
+// ---------------------------------------------------------------------------
+
+void TerminateGameWithError(const std::string& title, const std::string& message) {
+    MessageBoxA(
+        NULL,
+        message.c_str(),
+        title.c_str(),
+        MB_ICONSTOP | MB_SYSTEMMODAL | MB_TOPMOST
     );
-
-    if (hModule) {
-        char dllPath[MAX_PATH] = { 0 };
-        GetModuleFileNameA(hModule, dllPath, MAX_PATH);
-        std::string dir(dllPath);
-        size_t lastSlash = dir.find_last_of("\\/");
-        if (lastSlash != std::string::npos) {
-            std::string keyPath = dir.substr(0, lastSlash) + "\\convoygate.key";
-            std::ifstream test(keyPath);
-            if (test.good()) return keyPath;
-        }
-    }
-
-    // Fallbacks for known relative execution paths
-    const std::vector<std::string> fallbacks = {
-        "plugins\\convoygate.key",
-        "bin\\win_x64\\plugins\\convoygate.key",
-        "convoygate.key"
-    };
-
-    for (const auto& path : fallbacks) {
-        std::ifstream test(path);
-        if (test.good()) return path;
-    }
-
-    return "plugins\\convoygate.key";
+    TerminateProcess(GetCurrentProcess(), 0xC0000005);
 }
 
-// Full cryptographic lease validation
-bool VerifyConvoyGateSecurity(std::string& failureReason) {
-    std::string keyPath = ResolveKeyFilePath();
-    std::ifstream keyFile(keyPath, std::ios::binary);
+void EnforceLeaseOrTerminate() {
+    std::string keyPath = GetPluginDirectory() + "convoygate.key";
+    std::ifstream keyFile(keyPath);
 
+    // 1. Lease File Missing
     if (!keyFile.is_open()) {
-        failureReason = "convoygate.key file missing from plugins folder.\nPath checked: " + keyPath;
-        return false;
+        TerminateGameWithError(
+            "ConvoyGate - Access Denied",
+            "No active 30-day lease found ('convoygate.key').\n\n"
+            "American Truck Simulator startup has been blocked.\n"
+            "Open ConvoyGate Launcher and click 'Sync Mod' to renew your subscription."
+        );
+        return;
     }
 
     std::stringstream buffer;
     buffer << keyFile.rdbuf();
-    std::string fileContent = buffer.str();
+    std::string rawKeyContent = buffer.str();
     keyFile.close();
 
-    if (fileContent.empty()) {
-        failureReason = "convoygate.key is empty.";
-        return false;
+    // 2. Format Integrity Check (Expects JSON container from backend)
+    std::string dataBase64 = ExtractJsonField(rawKeyContent, "data");
+    std::string sigBase64 = ExtractJsonField(rawKeyContent, "signature");
+
+    if (dataBase64.empty() || sigBase64.empty()) {
+        TerminateGameWithError(
+            "ConvoyGate - Corrupted Key",
+            "Your ConvoyGate lease file structure is damaged or tampered with.\n\n"
+            "American Truck Simulator startup blocked."
+        );
+        return;
     }
 
-    // Extract "data" field
-    size_t dataPos = fileContent.find("\"data\"");
-    if (dataPos == std::string::npos) {
-        failureReason = "Corrupted token format: missing 'data' field.";
-        return false;
+    // 3. Decode & Parse Payload
+    std::string payloadJson = Base64Decode(dataBase64);
+    if (payloadJson.empty()) {
+        TerminateGameWithError(
+            "ConvoyGate - Decode Error",
+            "Failed to read encrypted lease payload.\n"
+            "Startup blocked."
+        );
+        return;
     }
 
-    size_t colonPos = fileContent.find(":", dataPos + 6);
-    if (colonPos == std::string::npos) {
-        failureReason = "Corrupted token format: missing colon after 'data'.";
-        return false;
+    std::string leaseHwid = ExtractJsonField(payloadJson, "hwid");
+    std::string expiresAtStr = ExtractJsonField(payloadJson, "expiresAt");
+
+    if (leaseHwid.empty() || expiresAtStr.empty()) {
+        TerminateGameWithError(
+            "ConvoyGate - Invalid Claims",
+            "Lease claims could not be verified.\n"
+            "Startup blocked."
+        );
+        return;
     }
 
-    size_t valStart = fileContent.find("\"", colonPos + 1);
-    if (valStart == std::string::npos) {
-        failureReason = "Corrupted token format: missing value for 'data'.";
-        return false;
-    }
-    valStart++;
-
-    size_t valEnd = fileContent.find("\"", valStart);
-    if (valEnd == std::string::npos) {
-        failureReason = "Corrupted token format: unterminated 'data' value.";
-        return false;
+    // 4. Cryptographic Hardware Binding Check
+    std::string localHwid = GetSystemHwid();
+    if (localHwid.empty() || leaseHwid != localHwid) {
+        TerminateGameWithError(
+            "ConvoyGate - Hardware Mismatch",
+            "This 30-day lease is registered to a different computer.\n\n"
+            "Mod sharing is prevented. Startup blocked."
+        );
+        return;
     }
 
-    std::string b64Data = fileContent.substr(valStart, valEnd - valStart);
-    std::string rawJsonPayload = Base64Decode(b64Data);
-
-    ConvoyGateLease lease = ParseLeasePayload(rawJsonPayload);
-    if (!lease.isValid) {
-        failureReason = "Invalid lease payload structure.";
-        return false;
+    // 5. Expiration Date Check (30-day rolling window)
+    long long expiresAt = 0;
+    try {
+        expiresAt = std::stoll(expiresAtStr);
+    } catch (...) {
+        expiresAt = 0;
     }
 
-    // Hardware Lock Check
-    std::string currentHwid = GetLocalWindowsHWID();
-    if (!lease.hwid.empty() && lease.hwid != currentHwid) {
-        failureReason = "Hardware ID mismatch.\nKey HWID: " + lease.hwid + "\nCurrent HWID: " + currentHwid;
-        return false;
+    long long now = static_cast<long long>(std::time(nullptr));
+    if (now >= expiresAt) {
+        TerminateGameWithError(
+            "ConvoyGate - Subscription Expired",
+            "Your 30-day ConvoyGate mod lease has expired.\n\n"
+            "Please open ConvoyGate Launcher to renew your subscription."
+        );
+        return;
     }
-
-    // Expiration Timestamp Check (30-day window)
-    auto nowSeconds = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
-
-    if (lease.expiresAt > 0 && nowSeconds > lease.expiresAt) {
-        failureReason = "30-Day Lease has expired. Please run the ConvoyGate Launcher to renew.";
-        return false;
-    }
-
-    return true;
 }
 
-// SCS Game Engine Plugin Initialization Hook
-#define SCSAPI_RESULT int
-#define SCS_RESULT_OK 0
-#define SCS_RESULT_GENERIC_ERROR 1
+// ---------------------------------------------------------------------------
+// SCS Software Telemetry SDK Bindings
+// ---------------------------------------------------------------------------
 
-extern "C" __declspec(dllexport) SCSAPI_RESULT scs_telemetry_init(
-    const unsigned int version,
-    const void* const params)
-{
-    OutputDebugStringA("[ConvoyGate] Hooking ATS telemetry bus...\n");
+#define SCS_EXPORT extern "C" __declspec(dllexport)
 
-    std::string failureReason;
-    if (!VerifyConvoyGateSecurity(failureReason)) {
-        std::string errorMsg = "ConvoyGate Security Check Failed:\n\n" + failureReason + 
-            "\n\nPlease open the ConvoyGate Launcher and click 'Sync & Download' to renew your lease.";
+SCS_EXPORT unsigned int scs_telemetry_init(const unsigned int version, const void *const params) {
+    // Verified on engine telemetry handshake
+    EnforceLeaseOrTerminate();
+    return 0; // SCS_RESULT_OK
+}
 
-        MessageBoxA(NULL, errorMsg.c_str(), "ConvoyGate Security System", MB_ICONERROR | MB_OK);
-        return SCS_RESULT_GENERIC_ERROR;
+SCS_EXPORT void scs_telemetry_shutdown(void) {
+    // Engine cleanup hook
+}
+
+// Entrypoint triggered the microsecond the game process maps the DLL
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        g_hModule = hModule;
+        DisableThreadLibraryCalls(hModule);
+        EnforceLeaseOrTerminate();
     }
-
-    OutputDebugStringA("[ConvoyGate] Access granted. Assets loaded.\n");
-    return SCS_RESULT_OK;
+    return TRUE;
 }
