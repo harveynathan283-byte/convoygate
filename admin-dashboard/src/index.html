@@ -4,392 +4,646 @@
   <meta charset="UTF-8">
   <title>ConvoyGate Admin Control Center</title>
   <style>
-    * { box-sizing: border-box; }
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background: #0d0f17;
-      color: #e2e8f0;
-      margin: 0;
-      padding: 24px;
-      user-select: none;
+    :root {
+      --bg-base: #060a12;
+      --bg-surface: #0d1629;
+      --bg-surface-hover: #121f3a;
+      --border-color: #172744;
+      --border-dashed: #7c3aed;
+      --text-main: #f1f5f9;
+      --text-muted: #8493ad;
+      --accent-purple: #9333ea;
+      --accent-purple-hover: #a855f7;
+      --accent-cyan: #00a2ff;
+      --success: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --discord: #5865F2;
+      --discord-hover: #4752c4;
     }
-    .header {
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-base);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+      padding: 30px;
+    }
+
+    /* Fullscreen Admin Discord Login Modal */
+    .login-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(circle at center, rgba(17, 24, 39, 0.98) 0%, rgba(6, 10, 18, 0.99) 100%);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .login-modal {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      width: 440px;
+      padding: 36px 30px;
+      text-align: center;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+    }
+
+    .login-icon {
+      width: 60px;
+      height: 60px;
+      background: linear-gradient(135deg, var(--accent-purple), var(--accent-cyan));
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      margin: 0 auto 18px auto;
+    }
+
+    .login-modal h2 {
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 8px;
+    }
+
+    .login-modal p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+      margin-bottom: 24px;
+    }
+
+    .btn-discord {
+      width: 100%;
+      background: var(--discord);
+      color: #fff;
+      padding: 12px 18px;
+      border-radius: 8px;
+      border: none;
+      font-weight: 700;
+      font-size: 0.92rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      transition: background 0.15s ease;
+    }
+
+    .btn-discord:hover {
+      background: var(--discord-hover);
+    }
+
+    .login-error {
+      display: none;
+      margin-top: 16px;
+      color: var(--danger);
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+
+    .header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+
+    .header-title h1 {
+      font-size: 1.5rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #a855f7, var(--accent-cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .header-title p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 6px 14px;
+      border-radius: 20px;
+      letter-spacing: 0.3px;
+    }
+
+    .status-online {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .status-offline {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--danger);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .admin-pill {
+      background: rgba(168, 85, 247, 0.15);
+      color: var(--accent-purple-hover);
+      border: 1px solid rgba(168, 85, 247, 0.3);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    .drop-zone {
+      background: rgba(13, 22, 41, 0.5);
+      border: 2px dashed var(--border-dashed);
+      border-radius: 12px;
+      padding: 44px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      margin-bottom: 18px;
+    }
+
+    .drop-zone:hover, .drop-zone.dragover {
+      background: rgba(124, 58, 237, 0.1);
+      border-color: var(--accent-purple-hover);
+    }
+
+    .drop-zone h3 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+
+    .drop-zone p {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
+    .actions-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 20px;
-      border-bottom: 1px solid #1f2438;
-      padding-bottom: 14px;
     }
-    h1 { margin: 0; color: #9d4edd; font-size: 1.6rem; }
-    .badge {
-      padding: 5px 12px;
-      border-radius: 16px;
-      font-size: 0.8rem;
-      font-weight: 600;
-    }
-    .badge.connected {
-      background: #0d2818;
-      color: #52b788;
-      border: 1px solid #1b4332;
-    }
-    .badge.disconnected {
-      background: #3b181f;
-      color: #f87171;
-      border: 1px solid #771d2d;
-    }
-    .drop-zone {
-      border: 2px dashed #5a189a;
-      background: #141724;
-      border-radius: 10px;
-      padding: 30px 20px;
-      text-align: center;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      margin-bottom: 15px;
-    }
-    .drop-zone:hover, .drop-zone.dragover {
-      border-color: #9d4edd;
-      background: #1c2033;
-    }
-    .drop-zone h3 { margin: 0 0 6px 0; color: #f1f5f9; font-size: 1.15rem; }
-    .drop-zone p { margin: 0; color: #94a3b8; font-size: 0.9rem; }
-    .actions-bar {
+
+    .btn-group {
       display: flex;
-      gap: 12px;
-      margin-bottom: 20px;
+      gap: 10px;
     }
+
     .btn {
-      padding: 9px 15px;
+      padding: 10px 18px;
       border-radius: 6px;
-      border: none;
-      cursor: pointer;
+      font-size: 0.84rem;
       font-weight: 600;
-      font-size: 0.85rem;
-      transition: opacity 0.2s;
+      border: 1px solid var(--border-color);
+      background: var(--bg-surface);
+      color: #cbd5e1;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.15s ease;
     }
-    .btn:hover { opacity: 0.9; }
-    .btn-primary { background: #7b2cbf; color: #fff; }
-    .btn-secondary { background: #242940; color: #cbd5e1; border: 1px solid #333a56; }
-    .btn-danger { background: #e63946; color: #fff; }
-    
-    .status-container {
+
+    .btn:hover {
+      background: var(--bg-surface-hover);
+      color: #fff;
+    }
+
+    .btn-primary {
+      background: #0284c7;
+      border-color: #0284c7;
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: #0369a1;
+    }
+
+    .btn-purple {
+      background: var(--accent-purple);
+      border-color: var(--accent-purple);
+      color: #fff;
+    }
+
+    .btn-purple:hover {
+      background: var(--accent-purple-hover);
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--danger);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      padding: 4px 10px;
+      font-size: 0.75rem;
+    }
+
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.3);
+    }
+
+    .alert-banner {
       display: none;
-      background: #162a21;
-      border: 1px solid #1f5139;
+      padding: 14px 18px;
       border-radius: 8px;
-      padding: 16px;
+      font-size: 0.84rem;
+      font-weight: 600;
       margin-bottom: 20px;
     }
-    .status-container.error {
-      background: #38151b;
-      border-color: #631d27;
+
+    .alert-banner.error {
+      display: block;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: var(--danger);
     }
-    .status-text {
-      color: #4ade80;
-      font-size: 0.95rem;
-      margin-bottom: 8px;
+
+    .alert-banner.success {
+      display: block;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: var(--success);
     }
-    .status-container.error .status-text {
-      color: #f87171;
+
+    .alert-banner.info {
+      display: block;
+      background: rgba(2, 132, 199, 0.15);
+      border: 1px solid rgba(2, 132, 199, 0.4);
+      color: var(--accent-cyan);
     }
-    .progress-bar-bg {
-      display: none;
-      width: 100%;
-      height: 8px;
-      background: #0f111a;
-      border-radius: 4px;
+
+    .catalog-section h2 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+
+    .table-container {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
       overflow: hidden;
-    }
-    .progress-bar-fill {
-      width: 0%;
-      height: 100%;
-      background: #9d4edd;
-      transition: width 0.15s ease;
     }
 
     table {
       width: 100%;
       border-collapse: collapse;
-      background: #141724;
-      border-radius: 8px;
-      overflow: hidden;
-      border: 1px solid #1f2438;
-    }
-    th, td {
-      padding: 12px 16px;
       text-align: left;
-      border-bottom: 1px solid #1f2438;
     }
+
     th {
-      background: #191c2b;
-      color: #94a3b8;
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      background: #09101e;
+      padding: 12px 16px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    td {
+      padding: 14px 16px;
+      font-size: 0.82rem;
+      border-bottom: 1px solid #14213a;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .empty-state {
+      padding: 30px;
+      text-align: center;
+      color: var(--danger);
+      font-size: 0.85rem;
     }
 
     .modal-overlay {
       display: none;
       position: fixed;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.75);
-      backdrop-filter: blur(4px);
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(3, 7, 18, 0.85);
+      backdrop-filter: blur(6px);
+      z-index: 1000;
       align-items: center;
       justify-content: center;
-      z-index: 1000;
     }
-    .modal-overlay.active { display: flex; }
+
     .modal-card {
-      background: #161926;
-      border: 1px solid #323954;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
       border-radius: 12px;
-      width: 480px;
-      padding: 24px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      width: 520px;
+      max-width: 90vw;
+      padding: 26px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
     }
-    .modal-card h2 { margin: 0 0 15px 0; color: #9d4edd; font-size: 1.3rem; }
-    .form-group { margin-bottom: 15px; }
-    .form-group label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 6px; }
-    .form-group input, .form-group select {
-      width: 100%;
-      padding: 9px 12px;
-      background: #0f111a;
-      border: 1px solid #2a3147;
-      border-radius: 6px;
+
+    .modal-header h3 {
+      font-size: 1.2rem;
+      font-weight: 800;
       color: #fff;
-      font-size: 0.9rem;
     }
-    .modal-buttons {
+
+    .modal-header p {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .modal-batch-notice {
+      display: none;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      color: var(--warning);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .form-group label {
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .form-group input, .form-group select {
+      background: #09101e;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: #fff;
+      font-size: 0.85rem;
+      outline: none;
+    }
+
+    .form-group input:focus, .form-group select:focus {
+      border-color: var(--accent-purple-hover);
+    }
+
+    .form-row {
+      display: flex;
+      gap: 12px;
+    }
+
+    .form-row .form-group {
+      flex: 1;
+    }
+
+    .selected-files-box {
+      max-height: 110px;
+      overflow-y: auto;
+      background: #060a12;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.74rem;
+      font-family: monospace;
+      color: #94a3b8;
+    }
+
+    .selected-files-box div {
+      padding: 2px 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .modal-actions {
       display: flex;
       justify-content: flex-end;
       gap: 10px;
-      margin-top: 20px;
+      margin-top: 8px;
     }
   </style>
 </head>
 <body>
 
-  <div class="header">
-    <div>
-      <h1>ConvoyGate Admin Publisher</h1>
-      <small style="color: #64748b;">Lock assets & sync live with subscribers</small>
+  <!-- Fullscreen Admin Discord Auth Overlay -->
+  <div class="login-overlay" id="adminLoginOverlay">
+    <div class="login-modal">
+      <div class="login-icon">👑</div>
+      <h2>ConvoyGate Admin</h2>
+      <p>Authentication required. Your Discord account will be audited for the Staff / Publisher role before access is granted.</p>
+      <button class="btn-discord" id="btnAdminDiscordLogin" onclick="startAdminDiscordLogin()">
+        <svg width="22" height="22" viewBox="0 0 127.14 96.36" fill="currentColor">
+          <path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.31,60,73.31,53s5-12.74,11.43-12.74S96.2,46,96.09,53,91.08,65.69,84.69,65.69Z"/>
+        </svg>
+        Log In with Admin Discord
+      </button>
+      <div class="login-error" id="adminLoginError"></div>
     </div>
-    <div id="connBadge" class="badge disconnected">Checking Server...</div>
   </div>
+
+  <header class="header-bar">
+    <div class="header-title">
+      <h1>ConvoyGate Admin Publisher</h1>
+      <p>Lock assets, merge Mega Packs & sync live with subscribers</p>
+    </div>
+    <div class="header-right">
+      <span class="admin-pill" id="adminUserPill">Admin: Authenticating...</span>
+      <span class="status-badge status-offline" id="backendStatus">Connecting...</span>
+    </div>
+  </header>
 
   <div class="drop-zone" id="dropZone">
     <h3>Drop Mod Here (.scs, .zip, or Folder)</h3>
-    <p>Applies full LFH/CD header scrambling to block WinRAR/7-Zip extraction</p>
+    <p>Drop a single mod or drop multiple files at once to compile a Mega Pack</p>
   </div>
 
-  <div class="actions-bar">
-    <button class="btn btn-secondary" id="btnSelectFolder">📁 Browse Folder</button>
-    <button class="btn btn-secondary" id="btnSelectFile">📦 Browse .SCS / .ZIP File</button>
-    <button class="btn btn-secondary" style="margin-left: auto;" onclick="loadCatalog()">🔄 Refresh Catalog</button>
-  </div>
-
-  <div id="statusContainer" class="status-container">
-    <div id="statusText" class="status-text"></div>
-    <div id="progressBarBg" class="progress-bar-bg">
-      <div id="progressBarFill" class="progress-bar-fill"></div>
+  <div class="actions-row">
+    <div class="btn-group">
+      <button class="btn" onclick="browseFolder()">📁 Browse Folder</button>
+      <button class="btn" onclick="browseSingleFile()">📦 Browse Single .SCS / .ZIP</button>
+      <button class="btn btn-purple" onclick="browseMultipleFiles()">📚 Browse Multiple Files (Mega Pack)</button>
     </div>
+    <button class="btn btn-primary" onclick="loadCatalog()">🔄 Refresh Catalog</button>
   </div>
 
-  <h2 style="font-size: 1.1rem; margin: 15px 0 10px 0; color: #cbd5e1;">Live Cloud Catalog</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Mod Slug</th>
-        <th>Display Name</th>
-        <th>Version</th>
-        <th>Access Tier</th>
-        <th>Package Size</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="catalogTable"></tbody>
-  </table>
+  <div class="alert-banner" id="alertBanner"></div>
 
-  <!-- Publisher Modal -->
-  <div class="modal-overlay" id="uploadModal">
+  <section class="catalog-section">
+    <h2>Live Cloud Catalog</h2>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>MOD SLUG</th>
+            <th>DISPLAY NAME</th>
+            <th>VERSION</th>
+            <th>ACCESS TIER</th>
+            <th>PACKAGE SIZE</th>
+            <th>ACTIONS</th>
+          </tr>
+        </thead>
+        <tbody id="catalogTableBody">
+          <tr>
+            <td colspan="6" class="empty-state">Awaiting authentication...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Adaptive Modal -->
+  <div class="modal-overlay" id="publishModal">
     <div class="modal-card">
-      <h2>Lock & Publish Mod</h2>
-      
-      <div class="form-group">
-        <label>Selected Source</label>
-        <input type="text" id="modalSourcePath" readonly style="opacity: 0.6; cursor: not-allowed;">
+      <div class="modal-header">
+        <h3 id="modalTitle">Publish & Encrypt Package</h3>
+        <p id="modalSubTitle">Configure mod parameters before streaming to VPS</p>
+      </div>
+
+      <div class="modal-batch-notice" id="batchNotice">
+        ⚠️ Multiple files selected. Single mod mode disabled — Mega Pack packaging enforced.
       </div>
 
       <div class="form-group">
-        <label>Mod Slug / Identifier (lowercase, no spaces)</label>
-        <input type="text" id="modalModId" placeholder="e.g. volvo-rigid">
+        <label>Selected Item(s)</label>
+        <div class="selected-files-box" id="modalFileList"></div>
       </div>
 
       <div class="form-group">
-        <label>Display Title</label>
-        <input type="text" id="modalModName" placeholder="e.g. Volvo FH Rigid Addon">
-      </div>
-
-      <div class="form-group">
-        <label>Version</label>
-        <input type="text" id="modalVersion" value="1.0.0">
-      </div>
-
-      <div class="form-group">
-        <label>Required Subscription Tier</label>
-        <select id="modalTier">
-          <option value="All">All Subscribers (Default)</option>
-          <option value="VIP">VIP Tier Only</option>
-          <option value="Tier 1">Tier 1</option>
+        <label>Package Type</label>
+        <select id="selectPackageType" onchange="onPackageTypeChange()">
+          <option value="single">Single Standalone Mod</option>
+          <option value="megapack">Mega Pack (Merged Archive)</option>
         </select>
       </div>
 
-      <div class="modal-buttons">
-        <button class="btn btn-secondary" id="btnCancelModal">Cancel</button>
-        <button class="btn btn-primary" id="btnConfirmPublish">Encrypt & Publish Mod</button>
+      <!-- Mega Pack Target Section -->
+      <div id="megaPackSection" style="display: none; flex-direction: column; gap: 14px;">
+        <div class="form-group">
+          <label>Target Mega Pack</label>
+          <select id="selectMegaPackTarget" onchange="onMegaPackTargetChange()">
+            <option value="__new__">+ Create New Mega Pack</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="newMegaPackInputGroup">
+          <label>New Mega Pack Name</label>
+          <input type="text" id="inputNewMegaPackName" placeholder="e.g. Australian Trucks Fleet">
+        </div>
+      </div>
+
+      <!-- Single Mod Name Field -->
+      <div class="form-group" id="singleNameGroup">
+        <label>Display Name</label>
+        <input type="text" id="inputDisplayName" placeholder="Mod Display Name">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Version</label>
+          <input type="text" id="inputVersion" value="1.0.0">
+        </div>
+        <div class="form-group">
+          <label>Access Tier</label>
+          <select id="selectTier">
+            <option value="All">All Tiers</option>
+            <option value="Tier 1">Tier 1</option>
+            <option value="Tier 2">Tier 2</option>
+            <option value="VIP">VIP</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" id="btnConfirmPublish" onclick="submitPublish()">Encrypt & Publish to VPS</button>
       </div>
     </div>
   </div>
 
   <script>
     const { ipcRenderer } = require("electron");
-    const path = require("path");
-
-    window.addEventListener("dragover", (e) => e.preventDefault());
-    window.addEventListener("drop", (e) => e.preventDefault());
 
     const dropZone = document.getElementById("dropZone");
-    const statusContainer = document.getElementById("statusContainer");
-    const statusText = document.getElementById("statusText");
-    const progressBarBg = document.getElementById("progressBarBg");
-    const progressBarFill = document.getElementById("progressBarFill");
-    const catalogTable = document.getElementById("catalogTable");
-    const connBadge = document.getElementById("connBadge");
+    const alertBanner = document.getElementById("alertBanner");
+    const backendStatus = document.getElementById("backendStatus");
+    const adminUserPill = document.getElementById("adminUserPill");
+    const catalogTableBody = document.getElementById("catalogTableBody");
 
-    const uploadModal = document.getElementById("uploadModal");
-    const modalSourcePath = document.getElementById("modalSourcePath");
-    const modalModId = document.getElementById("modalModId");
-    const modalModName = document.getElementById("modalModName");
-    const modalVersion = document.getElementById("modalVersion");
-    const modalTier = document.getElementById("modalTier");
+    const adminLoginOverlay = document.getElementById("adminLoginOverlay");
+    const btnAdminDiscordLogin = document.getElementById("btnAdminDiscordLogin");
+    const adminLoginError = document.getElementById("adminLoginError");
 
-    function setStatus(text, isError = false, percent = null) {
-      statusContainer.style.display = "block";
-      statusContainer.className = "status-container" + (isError ? " error" : "");
-      statusText.innerText = text;
+    const publishModal = document.getElementById("publishModal");
+    const batchNotice = document.getElementById("batchNotice");
+    const selectPackageType = document.getElementById("selectPackageType");
+    const megaPackSection = document.getElementById("megaPackSection");
+    const selectMegaPackTarget = document.getElementById("selectMegaPackTarget");
+    const newMegaPackInputGroup = document.getElementById("newMegaPackInputGroup");
+    const singleNameGroup = document.getElementById("singleNameGroup");
+    const modalFileList = document.getElementById("modalFileList");
 
-      if (percent !== null && percent >= 0) {
-        progressBarBg.style.display = "block";
-        progressBarFill.style.width = percent + "%";
-      } else {
-        progressBarBg.style.display = "none";
-      }
-    }
+    let queuedFiles = [];
+    let knownMegaPacks = [];
 
-    ipcRenderer.on("publish-status", (event, data) => {
-      setStatus(data.message, false, data.percent !== undefined ? data.percent : null);
-    });
+    async function startAdminDiscordLogin() {
+      btnAdminDiscordLogin.innerText = "Awaiting Discord authorization...";
+      btnAdminDiscordLogin.style.opacity = "0.7";
+      btnAdminDiscordLogin.style.pointerEvents = "none";
+      adminLoginError.style.display = "none";
 
-    async function loadCatalog() {
-      const res = await ipcRenderer.invoke("fetch-catalog");
-      catalogTable.innerHTML = "";
+      const res = await ipcRenderer.invoke("discord-admin-login");
       if (res && res.success) {
-        connBadge.className = "badge connected";
-        connBadge.innerText = "Connected: 192.168.86.111";
-
-        if (res.mods && res.mods.length > 0) {
-          res.mods.forEach(mod => {
-            const row = document.createElement("tr");
-            row.innerHTML = `
-              <td><code>${mod.id}</code></td>
-              <td><strong>${mod.name}</strong></td>
-              <td>${mod.version}</td>
-              <td><span style="background: #231936; color: #d8b4fe; padding: 2px 7px; border-radius: 4px; font-size: 0.8rem;">${mod.tier}</span></td>
-              <td>${(mod.file_size / 1024 / 1024).toFixed(2)} MB</td>
-              <td><button class="btn btn-danger" onclick="deleteMod('${mod.id}')">Delete</button></td>
-            `;
-            catalogTable.appendChild(row);
-          });
-        } else {
-          catalogTable.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b; padding: 20px;">No mods published yet. Add a mod using the drop zone or browse buttons above.</td></tr>`;
-        }
-      } else {
-        connBadge.className = "badge disconnected";
-        connBadge.innerText = "Offline (Backend Unreachable)";
-        catalogTable.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#f87171; padding: 20px;">Unable to reach backend server at 192.168.86.111:3000. Ensure server is running.</td></tr>`;
-      }
-    }
-    loadCatalog();
-    setInterval(loadCatalog, 10000);
-
-    window.deleteMod = async (modId) => {
-      if (confirm(`Are you sure you want to remove '${modId}' from the cloud?`)) {
-        setStatus(`Deleting ${modId}...`);
-        await ipcRenderer.invoke("delete-mod", modId);
-        setStatus(`Mod '${modId}' removed from server.`);
-        loadCatalog();
-      }
-    };
-
-    function openPublishModal(selectedPath) {
-      const rawBase = path.basename(selectedPath);
-      const ext = path.extname(rawBase);
-      const cleanSlug = path.basename(selectedPath, ext).toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-
-      modalSourcePath.value = selectedPath;
-      modalModId.value = cleanSlug;
-      modalModName.value = path.basename(selectedPath, ext);
-      modalVersion.value = "1.0.0";
-      modalTier.value = "All";
-
-      uploadModal.classList.add("active");
-    }
-
-    document.getElementById("btnCancelModal").addEventListener("click", () => {
-      uploadModal.classList.remove("active");
-    });
-
-    document.getElementById("btnConfirmPublish").addEventListener("click", async () => {
-      const inputPath = modalSourcePath.value;
-      const modId = modalModId.value.trim();
-      const name = modalModName.value.trim();
-      const version = modalVersion.value.trim() || "1.0.0";
-      const tier = modalTier.value;
-
-      if (!modId || !name) {
-        alert("Please provide both Mod Slug and Display Title.");
-        return;
-      }
-
-      uploadModal.classList.remove("active");
-      setStatus(`Locking & publishing '${name}'...`, false, 0);
-
-      const result = await ipcRenderer.invoke("process-and-upload", {
-        inputPath,
-        modId,
-        name,
-        version,
-        tier,
-      });
-
-      if (result && result.success) {
-        setStatus(`Success! '${name}' is locked and live on the cloud catalog.`, false, 100);
+        adminLoginOverlay.style.display = "none";
+        adminUserPill.innerText = `Admin: ${res.user.username}`;
         loadCatalog();
       } else {
-        setStatus(`Failed to publish: ${result ? result.error : "Unknown error"}`, true);
+        btnAdminDiscordLogin.innerHTML = `
+          <svg width="22" height="22" viewBox="0 0 127.14 96.36" fill="currentColor">
+            <path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.31,60,73.31,53s5-12.74,11.43-12.74S96.2,46,96.09,53,91.08,65.69,84.69,65.69Z"/>
+          </svg>
+          Log In with Admin Discord
+        `;
+        btnAdminDiscordLogin.style.opacity = "1";
+        btnAdminDiscordLogin.style.pointerEvents = "auto";
+        adminLoginError.innerText = res && res.error ? res.error : "Admin verification closed or rejected.";
+        adminLoginError.style.display = "block";
       }
-    });
-
-    document.getElementById("btnSelectFolder").addEventListener("click", async () => {
-      const folderPath = await ipcRenderer.invoke("dialog-select-folder");
-      if (folderPath) openPublishModal(folderPath);
-    });
-
-    document.getElementById("btnSelectFile").addEventListener("click", async () => {
-      const filePath = await ipcRenderer.invoke("dialog-select-file");
-      if (filePath) openPublishModal(filePath);
-    });
+    }
 
     dropZone.addEventListener("dragover", (e) => {
       e.preventDefault();
@@ -400,14 +654,182 @@
       dropZone.classList.remove("dragover");
     });
 
-    dropZone.addEventListener("drop", (e) => {
+    dropZone.addEventListener("drop", async (e) => {
       e.preventDefault();
       dropZone.classList.remove("dragover");
-
       if (e.dataTransfer.files.length > 0) {
-        const droppedPath = e.dataTransfer.files[0].path;
-        if (droppedPath) openPublishModal(droppedPath);
+        const paths = Array.from(e.dataTransfer.files).map(f => f.path);
+        openPublishModal(paths);
       }
+    });
+
+    async function browseFolder() {
+      const folderPath = await ipcRenderer.invoke("browse-folder");
+      if (folderPath) openPublishModal([folderPath]);
+    }
+
+    async function browseSingleFile() {
+      const filePath = await ipcRenderer.invoke("browse-file");
+      if (filePath) openPublishModal([filePath]);
+    }
+
+    async function browseMultipleFiles() {
+      const filePaths = await ipcRenderer.invoke("browse-multiple-files");
+      if (filePaths && filePaths.length > 0) openPublishModal(filePaths);
+    }
+
+    async function openPublishModal(paths) {
+      queuedFiles = paths;
+      modalFileList.innerHTML = paths.map(p => `<div>• ${p.split(/[\\/]/).pop()}</div>`).join("");
+
+      knownMegaPacks = await ipcRenderer.invoke("get-megapacks");
+      populateMegaPackSelect();
+
+      const isMulti = paths.length > 1;
+
+      if (isMulti) {
+        batchNotice.style.display = "block";
+        selectPackageType.value = "megapack";
+        selectPackageType.disabled = true;
+      } else {
+        batchNotice.style.display = "none";
+        selectPackageType.disabled = false;
+        selectPackageType.value = "single";
+
+        const baseName = paths[0].split(/[\\/]/).pop().replace(/\.(scs|zip)$/i, "");
+        document.getElementById("inputDisplayName").value = baseName.replace(/[_-]/g, " ");
+      }
+
+      onPackageTypeChange();
+      publishModal.style.display = "flex";
+    }
+
+    function populateMegaPackSelect() {
+      selectMegaPackTarget.innerHTML = `<option value="__new__">+ Create New Mega Pack</option>`;
+      knownMegaPacks.forEach(pack => {
+        const opt = document.createElement("option");
+        opt.value = pack.id;
+        opt.textContent = `${pack.name} (${pack.id}.scs)`;
+        selectMegaPackTarget.appendChild(opt);
+      });
+    }
+
+    function onPackageTypeChange() {
+      const isMega = selectPackageType.value === "megapack";
+      megaPackSection.style.display = isMega ? "flex" : "none";
+      singleNameGroup.style.display = isMega ? "none" : "flex";
+
+      if (isMega) {
+        onMegaPackTargetChange();
+      }
+    }
+
+    function onMegaPackTargetChange() {
+      const isNew = selectMegaPackTarget.value === "__new__";
+      newMegaPackInputGroup.style.display = isNew ? "flex" : "none";
+    }
+
+    function closeModal() {
+      publishModal.style.display = "none";
+      queuedFiles = [];
+    }
+
+    async function submitPublish() {
+      const isMega = selectPackageType.value === "megapack";
+      const version = document.getElementById("inputVersion").value || "1.0.0";
+      const tier = document.getElementById("selectTier").value || "All";
+
+      let payload = {
+        isMegaPack: isMega,
+        filePaths: queuedFiles,
+        version,
+        tier
+      };
+
+      if (isMega) {
+        const isNew = selectMegaPackTarget.value === "__new__";
+        if (isNew) {
+          const packName = document.getElementById("inputNewMegaPackName").value.trim();
+          if (!packName) {
+            alert("Please provide a name for the new Mega Pack.");
+            return;
+          }
+          payload.megaPackName = packName;
+          payload.megaPackId = packName.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+        } else {
+          const selectedId = selectMegaPackTarget.value;
+          const selectedObj = knownMegaPacks.find(p => p.id === selectedId);
+          payload.megaPackId = selectedId;
+          payload.megaPackName = selectedObj ? selectedObj.name : selectedId;
+        }
+      } else {
+        const name = document.getElementById("inputDisplayName").value.trim();
+        if (!name) {
+          alert("Please provide a display name.");
+          return;
+        }
+        payload.name = name;
+        payload.modId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+      }
+
+      closeModal();
+      showAlert("Preparing, encrypting, and uploading package...", "info");
+
+      const res = await ipcRenderer.invoke("publish-package-adaptive", payload);
+      if (res && res.success) {
+        showAlert(`Successfully published: ${res.name || payload.megaPackName || payload.name}`, "success");
+        await loadCatalog();
+      } else {
+        showAlert(`Failed to publish: ${res ? res.error : "Unknown error"}`, "error");
+      }
+    }
+
+    async function loadCatalog() {
+      const res = await ipcRenderer.invoke("fetch-catalog");
+      if (res && res.success) {
+        backendStatus.className = "status-badge status-online";
+        backendStatus.innerText = "Online (Sydney VPS)";
+
+        if (res.mods.length === 0) {
+          catalogTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 24px; color: var(--text-muted);">No mods published yet. Drop a file above to upload.</td></tr>`;
+          return;
+        }
+
+        catalogTableBody.innerHTML = res.mods.map(mod => `
+          <tr>
+            <td style="font-family: monospace; color: #38bdf8;">${mod.id}</td>
+            <td style="font-weight: 600;">${mod.name}</td>
+            <td>v${mod.version}</td>
+            <td><span style="background: rgba(147, 51, 234, 0.2); color: #c084fc; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem;">${mod.tier}</span></td>
+            <td>${(mod.file_size / 1024 / 1024).toFixed(2)} MB</td>
+            <td><button class="btn btn-danger" onclick="deleteMod('${mod.id}')">Delete</button></td>
+          </tr>
+        `).join("");
+      } else {
+        backendStatus.className = "status-badge status-offline";
+        backendStatus.innerText = "Offline (Backend Unreachable)";
+        catalogTableBody.innerHTML = `<tr><td colspan="6" class="empty-state">Unable to reach backend server at https://api.convoygate.com.</td></tr>`;
+      }
+    }
+
+    async function deleteMod(modId) {
+      if (!confirm(`Are you sure you want to delete ${modId} from the VPS?`)) return;
+      const res = await ipcRenderer.invoke("delete-mod", modId);
+      if (res && res.success) {
+        showAlert(`Deleted ${modId} successfully.`, "success");
+        await loadCatalog();
+      } else {
+        showAlert(`Failed to delete: ${res ? res.error : "Unknown error"}`, "error");
+      }
+    }
+
+    function showAlert(msg, type) {
+      alertBanner.className = `alert-banner ${type}`;
+      alertBanner.innerText = msg;
+    }
+
+    ipcRenderer.on("publish-status", (event, data) => {
+      showAlert(data.message, "info");
     });
   </script>
 </body>

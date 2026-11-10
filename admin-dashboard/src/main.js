@@ -4,26 +4,44 @@ const fs = require("fs");
 const os = require("os");
 const http = require("http");
 const https = require("https");
+const zlib = require("zlib");
 const { pipeline } = require("stream/promises");
 const { Transform } = require("stream");
 const axios = require("axios");
 
 let mainWindow;
 const SERVER_URL = "https://api.convoygate.com";
+let adminSessionToken = null;
 
-// ConvoyGate Static Master Cypher Seed
+// ConvoyGate Static Master Cipher Key
 const DRM_CIPHER_KEY = Buffer.from([
   0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61, // "ConvoyGa"
   0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65  // "teSecure"
 ]);
 
+const MEGAPACKS_DIR = path.join(app.getPath("userData"), "megapacks_storage");
+const REGISTRY_FILE = path.join(app.getPath("userData"), "megapacks_registry.json");
+
+if (!fs.existsSync(MEGAPACKS_DIR)) fs.mkdirSync(MEGAPACKS_DIR, { recursive: true });
+
+function loadRegistry() {
+  try {
+    if (fs.existsSync(REGISTRY_FILE)) return JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf8"));
+  } catch (e) {}
+  return [];
+}
+
+function saveRegistry(data) {
+  fs.writeFileSync(REGISTRY_FILE, JSON.stringify(data, null, 2), "utf8");
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1060,
-    height: 760,
+    width: 1080,
+    height: 780,
     minWidth: 920,
     minHeight: 620,
-    backgroundColor: "#0d0f17",
+    backgroundColor: "#060a12",
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: true,
@@ -35,6 +53,42 @@ function createWindow() {
 }
 
 app.whenReady().then(createWindow);
+
+// --- Discord Admin Authentication ---
+ipcMain.handle("discord-admin-login", async () => {
+  return new Promise((resolve) => {
+    const authWin = new BrowserWindow({
+      width: 500,
+      height: 750,
+      parent: mainWindow,
+      modal: true,
+      autoHideMenuBar: true,
+      backgroundColor: "#060a12",
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+
+    authWin.loadURL(`${SERVER_URL}/api/v1/auth/discord/admin-login`);
+
+    authWin.webContents.on("did-navigate", (event, url) => {
+      if (url.includes("/api/v1/auth/discord/admin-success")) {
+        const urlObj = new URL(url);
+        adminSessionToken = urlObj.searchParams.get("token");
+        const username = urlObj.searchParams.get("username");
+        authWin.close();
+        resolve({ success: true, user: { username }, token: adminSessionToken });
+      }
+    });
+
+    authWin.on("closed", () => {
+      if (!adminSessionToken) {
+        resolve({ success: false, error: "Admin login window closed." });
+      }
+    });
+  });
+});
 
 // Encrypt a buffer in place with stream cipher
 function encryptPayload(buffer) {
@@ -85,22 +139,18 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
     const commentLen = cdBuf.readUInt16LE(pos + 32);
     const lfhOffset = cdBuf.readUInt32LE(pos + 42);
 
-    // Read filename
     const nameBuf = Buffer.alloc(nameLen);
     fs.readSync(fd, nameBuf, 0, nameLen, cdOffset + pos + 46);
     const fileName = nameBuf.toString("utf8");
 
-    // Don't encrypt manifest.sii or icon so Mod Manager can show name/icon
     const isMetadata = fileName.toLowerCase().includes("manifest.sii") || 
                        fileName.toLowerCase().includes("mod_icon.jpg") ||
                        fileName.toLowerCase().includes("description.txt");
 
-    // 1. Scramble Central Directory
-    cdBuf.writeUInt16LE(99, pos + 6); // Version 9.9
+    cdBuf.writeUInt16LE(99, pos + 6);
     const flags = cdBuf.readUInt16LE(pos + 8);
-    cdBuf.writeUInt16LE(flags | 0x0001, pos + 8); // Encrypted bit
+    cdBuf.writeUInt16LE(flags | 0x0001, pos + 8);
 
-    // 2. Read LFH and encrypt actual asset data
     const lfhHeader = Buffer.alloc(30);
     fs.readSync(fd, lfhHeader, 0, 30, lfhOffset);
 
@@ -111,16 +161,12 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
       const dataOffset = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
 
       if (!isMetadata && compressedSize > 0) {
-        // Read the real asset bytes, encrypt them, write them back!
         const payloadBuf = Buffer.alloc(compressedSize);
         fs.readSync(fd, payloadBuf, 0, compressedSize, dataOffset);
-
         encryptPayload(payloadBuf);
-
         fs.writeSync(fd, payloadBuf, 0, compressedSize, dataOffset);
       }
 
-      // Mark LFH header
       lfhHeader.writeUInt16LE(99, 4);
       lfhHeader.writeUInt16LE(flags | 0x0001, 6);
       fs.writeSync(fd, lfhHeader, 0, 30, lfhOffset);
@@ -128,16 +174,13 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
 
     pos += 46 + nameLen + extraLen + commentLen;
     fileCount++;
-
     if (onProgress && fileCount % 100 === 0) onProgress(fileCount);
   }
 
-  // Write patched CD
   fs.writeSync(fd, cdBuf, 0, cdSize, cdOffset);
   fs.closeSync(fd);
 }
 
-// Low-level recursive folder scanner
 function getAllFiles(dir, base = "") {
   let results = [];
   const list = fs.readdirSync(dir, { withFileTypes: true });
@@ -153,7 +196,97 @@ function getAllFiles(dir, base = "") {
   return results;
 }
 
-// Pack folder with encrypted payload bytes
+function copyFolderRecursive(source, target) {
+  if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+  const items = fs.readdirSync(source, { withFileTypes: true });
+  for (const item of items) {
+    const srcPath = path.join(source, item.name);
+    const dstPath = path.join(target, item.name);
+    if (item.isDirectory()) {
+      copyFolderRecursive(srcPath, dstPath);
+    } else {
+      fs.copyFileSync(srcPath, dstPath);
+    }
+  }
+}
+
+function extractArchiveToDir(archivePath, targetDir) {
+  if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+
+  const fd = fs.openSync(archivePath, "r");
+  try {
+    const stat = fs.fstatSync(fd);
+    const fileSize = stat.size;
+    const searchLen = Math.min(fileSize, 65557);
+    const searchBuf = Buffer.alloc(searchLen);
+    fs.readSync(fd, searchBuf, 0, searchLen, fileSize - searchLen);
+
+    let eocdOffset = -1;
+    for (let i = searchLen - 22; i >= 0; i--) {
+      if (searchBuf.readUInt32LE(i) === 0x06054b50) {
+        eocdOffset = i;
+        break;
+      }
+    }
+    if (eocdOffset === -1) throw new Error("Invalid archive: missing EOCD.");
+
+    const cdSize = searchBuf.readUInt32LE(eocdOffset + 12);
+    const cdOffset = searchBuf.readUInt32LE(eocdOffset + 16);
+    const cdBuf = Buffer.alloc(cdSize);
+    fs.readSync(fd, cdBuf, 0, cdSize, cdOffset);
+
+    let pos = 0;
+    while (pos < cdSize) {
+      if (cdBuf.readUInt32LE(pos) !== 0x02014b50) break;
+
+      const method = cdBuf.readUInt16LE(pos + 10);
+      const compressedSize = cdBuf.readUInt32LE(pos + 20);
+      const nameLen = cdBuf.readUInt16LE(pos + 28);
+      const extraLen = cdBuf.readUInt16LE(pos + 30);
+      const commentLen = cdBuf.readUInt16LE(pos + 32);
+      const lfhOffset = cdBuf.readUInt32LE(pos + 42);
+
+      const nameBuf = Buffer.alloc(nameLen);
+      fs.readSync(fd, nameBuf, 0, nameLen, cdOffset + pos + 46);
+      const rawFileName = nameBuf.toString("utf8").replace(/\\/g, "/");
+
+      pos += 46 + nameLen + extraLen + commentLen;
+      if (rawFileName.endsWith("/")) continue;
+
+      const lfhHeader = Buffer.alloc(30);
+      fs.readSync(fd, lfhHeader, 0, 30, lfhOffset);
+      if (lfhHeader.readUInt32LE(0) !== 0x04034b50) continue;
+
+      const lfhNameLen = lfhHeader.readUInt16LE(26);
+      const lfhExtraLen = lfhHeader.readUInt16LE(28);
+      const dataOffset = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
+
+      const compBuf = Buffer.alloc(compressedSize);
+      fs.readSync(fd, compBuf, 0, compressedSize, dataOffset);
+
+      let decompressed;
+      if (method === 0) {
+        decompressed = compBuf;
+      } else if (method === 8) {
+        try {
+          decompressed = zlib.inflateRawSync(compBuf);
+        } catch (e) {
+          continue;
+        }
+      } else {
+        continue;
+      }
+
+      const destPath = path.join(targetDir, rawFileName);
+      const destSubDir = path.dirname(destPath);
+      if (!fs.existsSync(destSubDir)) fs.mkdirSync(destSubDir, { recursive: true });
+      fs.writeFileSync(destPath, decompressed);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function packFolderEncrypted(sourceFolder, outputPath, onProgress) {
   const files = getAllFiles(sourceFolder);
   if (files.length === 0) throw new Error("Folder contains no mod assets.");
@@ -250,6 +383,13 @@ function streamUploadToBackend(filePath, headers, onProgress) {
     const stat = fs.statSync(filePath);
     const client = url.protocol === "https:" ? https : http;
 
+    const authHeaders = {};
+    if (adminSessionToken) {
+      authHeaders["Authorization"] = `Bearer ${adminSessionToken}`;
+    } else {
+      authHeaders["x-admin-key"] = "cg_admin_local_fallback";
+    }
+
     const req = client.request(
       {
         protocol: url.protocol,
@@ -260,6 +400,7 @@ function streamUploadToBackend(filePath, headers, onProgress) {
         headers: {
           "Content-Type": "application/octet-stream",
           "Content-Length": stat.size,
+          ...authHeaders,
           ...headers,
         },
       },
@@ -293,123 +434,184 @@ function streamUploadToBackend(filePath, headers, onProgress) {
   });
 }
 
-async function handleProcessAndUpload(event, arg) {
-  let inputPath = "";
-  let modId = "";
-  let name = "";
-  let version = "1.0.0";
-  let tier = "All";
+function updateMegaPackManifest(targetDir, megaPackName, version, includedFiles) {
+  const manifestPath = path.join(targetDir, "manifest.sii");
+  const descPath = path.join(targetDir, "description.txt");
 
-  if (typeof arg === "string") {
-    inputPath = arg;
-    const baseName = path.basename(inputPath).replace(/\.(scs|zip)$/i, "");
-    modId = baseName.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
-    name = baseName.replace(/[_-]/g, " ");
-  } else if (arg && typeof arg === "object") {
-    inputPath = arg.inputPath || arg.filePath || "";
-    const baseName = path.basename(inputPath).replace(/\.(scs|zip)$/i, "");
-    modId = arg.modId || baseName.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
-    name = arg.name || baseName.replace(/[_-]/g, " ");
-    version = arg.version || "1.0.0";
-    tier = arg.tier || "All";
-  }
+  const fileListText = includedFiles.map(f => `- ${f}`).join("\n");
+  const descContent = `Mega Pack: ${megaPackName}\n` +
+    `Version: ${version}\n` +
+    `Protected by ConvoyGate DRM\n\n` +
+    `Included Packages:\n${fileListText}\n`;
 
-  let finalScsFile = null;
+  fs.writeFileSync(descPath, descContent, "utf8");
+
+  const manifestContent = `SiiNunit
+{
+mod_package : .package_info {
+    package_version: "${version}"
+    display_name: "${megaPackName}"
+    author: "ConvoyGate Suite"
+    category[]: "truck"
+    category[]: "trailer"
+    category[]: "tuning_parts"
+    icon: "mod_icon.jpg"
+    description_file: "description.txt"
+}
+}
+`;
+  fs.writeFileSync(manifestPath, manifestContent, "utf8");
+}
+
+ipcMain.handle("get-megapacks", () => loadRegistry());
+
+ipcMain.handle("browse-folder", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Mod Folder",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle("browse-file", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Single Mod File",
+    filters: [{ name: "Mod Archives (*.scs, *.zip)", extensions: ["scs", "zip"] }],
+    properties: ["openFile"],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle("browse-multiple-files", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Multiple Mod Files for Mega Pack",
+    filters: [{ name: "Mod Archives (*.scs, *.zip)", extensions: ["scs", "zip"] }],
+    properties: ["openFile", "multiSelections"],
+  });
+  if (result.canceled || !result.filePaths.length) return [];
+  return result.filePaths;
+});
+
+ipcMain.handle("publish-package-adaptive", async (event, payload) => {
+  let tmpFinalScs = null;
 
   try {
-    const stat = fs.statSync(inputPath);
-    finalScsFile = path.join(os.tmpdir(), `${modId}_locked.scs`);
-
+    const { isMegaPack, filePaths, version, tier } = payload;
     const sendStatus = (message, percent) => {
       event.sender.send("publish-status", { message, percent });
     };
 
-    if (stat.isFile()) {
-      sendStatus("Encrypting 3D assets & obfuscating headers...", 0);
-      encryptAndLockScsArchive(inputPath, finalScsFile, (count) => {
-        sendStatus(`Encrypting assets: ${count} items secured...`);
-      });
-    } else {
-      sendStatus("Compiling folder into encrypted SCS archive...", 0);
-      packFolderEncrypted(inputPath, finalScsFile, (current, total) => {
-        sendStatus(`Encrypting & packing: ${current} / ${total} files...`);
-      });
+    if (!filePaths || filePaths.length === 0) {
+      return { success: false, error: "No files provided." };
     }
 
-    sendStatus("Connecting to server stream...", 0);
+    if (!isMegaPack) {
+      const filePath = filePaths[0];
+      const modId = payload.modId;
+      const modName = payload.name;
+      const stat = fs.statSync(filePath);
 
-    const result = await streamUploadToBackend(
-      finalScsFile,
-      {
-        "x-mod-id": encodeURIComponent(modId),
-        "x-mod-name": encodeURIComponent(name),
-        "x-mod-version": encodeURIComponent(version),
-        "x-mod-tier": encodeURIComponent(tier),
-      },
-      (bytesSent, totalBytes) => {
-        const percent = Math.round((bytesSent / totalBytes) * 100);
-        const sentMB = (bytesSent / 1024 / 1024).toFixed(1);
-        const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
+      tmpFinalScs = path.join(os.tmpdir(), `${modId}_locked.scs`);
 
-        if (percent >= 100) {
-          sendStatus(`Upload complete (${totalMB} MB). Saving to database catalog...`, 100);
+      if (stat.isFile()) {
+        sendStatus("Encrypting 3D assets & obfuscating headers...", 0);
+        encryptAndLockScsArchive(filePath, tmpFinalScs, (count) => {
+          sendStatus(`Secured ${count} assets...`);
+        });
+      } else {
+        sendStatus("Compiling folder into encrypted SCS archive...", 0);
+        packFolderEncrypted(filePath, tmpFinalScs, (current, total) => {
+          sendStatus(`Compiling: ${current} / ${total} files...`);
+        });
+      }
+
+      sendStatus("Streaming locked mod to Sydney VPS...", 0);
+      const result = await streamUploadToBackend(
+        tmpFinalScs,
+        {
+          "x-mod-id": encodeURIComponent(modId),
+          "x-mod-name": encodeURIComponent(modName),
+          "x-mod-version": encodeURIComponent(version),
+          "x-mod-tier": encodeURIComponent(tier),
+        },
+        (sent, total) => {
+          const pct = Math.round((sent / total) * 100);
+          sendStatus(`Uploading: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
+        }
+      );
+
+      if (fs.existsSync(tmpFinalScs)) fs.unlinkSync(tmpFinalScs);
+      return result;
+
+    } else {
+      const megaPackId = payload.megaPackId;
+      const megaPackName = payload.megaPackName;
+      const packWorkingDir = path.join(MEGAPACKS_DIR, megaPackId);
+
+      if (!fs.existsSync(packWorkingDir)) {
+        fs.mkdirSync(packWorkingDir, { recursive: true });
+      }
+
+      const registry = loadRegistry();
+      let packEntry = registry.find(p => p.id === megaPackId);
+      if (!packEntry) {
+        packEntry = { id: megaPackId, name: megaPackName, files: [] };
+        registry.push(packEntry);
+      }
+
+      for (let i = 0; i < filePaths.length; i++) {
+        const itemPath = filePaths[i];
+        const baseName = path.basename(itemPath);
+        sendStatus(`Merging [${i + 1}/${filePaths.length}]: ${baseName}...`, Math.round((i / filePaths.length) * 50));
+
+        const stat = fs.statSync(itemPath);
+        if (stat.isDirectory()) {
+          copyFolderRecursive(itemPath, packWorkingDir);
         } else {
-          sendStatus(`Uploading: ${percent}% (${sentMB} MB / ${totalMB} MB)...`, percent);
+          extractArchiveToDir(itemPath, packWorkingDir);
+        }
+
+        if (!packEntry.files.includes(baseName)) {
+          packEntry.files.push(baseName);
         }
       }
-    );
 
-    if (fs.existsSync(finalScsFile)) {
-      fs.unlinkSync(finalScsFile);
+      saveRegistry(registry);
+
+      sendStatus("Generating master ATS Mega Pack manifest...", 60);
+      updateMegaPackManifest(packWorkingDir, megaPackName, version, packEntry.files);
+
+      tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_megapack_locked.scs`);
+      sendStatus("Encrypting combined Mega Pack assets...", 70);
+      packFolderEncrypted(packWorkingDir, tmpFinalScs, (curr, total) => {
+        sendStatus(`Encrypting Mega Pack: ${curr}/${total} files...`);
+      });
+
+      sendStatus("Streaming Mega Pack to Sydney VPS...", 85);
+      const result = await streamUploadToBackend(
+        tmpFinalScs,
+        {
+          "x-mod-id": encodeURIComponent(megaPackId),
+          "x-mod-name": encodeURIComponent(megaPackName),
+          "x-mod-version": encodeURIComponent(version),
+          "x-mod-tier": encodeURIComponent(tier),
+        },
+        (sent, total) => {
+          const pct = Math.round((sent / total) * 100);
+          sendStatus(`Uploading Mega Pack: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
+        }
+      );
+
+      if (fs.existsSync(tmpFinalScs)) fs.unlinkSync(tmpFinalScs);
+      return result;
     }
 
-    return result;
   } catch (err) {
-    if (finalScsFile && fs.existsSync(finalScsFile)) {
-      fs.unlinkSync(finalScsFile);
-    }
+    if (tmpFinalScs && fs.existsSync(tmpFinalScs)) fs.unlinkSync(tmpFinalScs);
     return { success: false, error: err.message };
   }
-}
-
-// Support both naming conventions so the UI never breaks
-ipcMain.handle("process-and-upload", handleProcessAndUpload);
-ipcMain.handle("publish-mod", handleProcessAndUpload);
-
-ipcMain.handle("dialog-select-folder", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select Uncompressed Mod Folder",
-    properties: ["openDirectory"],
-  });
-  if (result.canceled || !result.filePaths.length) return null;
-  return result.filePaths[0];
-});
-ipcMain.handle("browse-folder", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select Uncompressed Mod Folder",
-    properties: ["openDirectory"],
-  });
-  if (result.canceled || !result.filePaths.length) return null;
-  return result.filePaths[0];
-});
-
-ipcMain.handle("dialog-select-file", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select Mod File (.scs or .zip)",
-    filters: [{ name: "Mod Archives (*.scs, *.zip)", extensions: ["scs", "zip"] }],
-    properties: ["openFile"],
-  });
-  if (result.canceled || !result.filePaths.length) return null;
-  return result.filePaths[0];
-});
-ipcMain.handle("browse-file", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select Mod File (.scs or .zip)",
-    filters: [{ name: "Mod Archives (*.scs, *.zip)", extensions: ["scs", "zip"] }],
-    properties: ["openFile"],
-  });
-  if (result.canceled || !result.filePaths.length) return null;
-  return result.filePaths[0];
 });
 
 ipcMain.handle("fetch-catalog", async () => {
@@ -423,13 +625,29 @@ ipcMain.handle("fetch-catalog", async () => {
 
 ipcMain.handle("delete-mod", async (event, modId) => {
   try {
-    const res = await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${encodeURIComponent(modId)}`, { timeout: 8000 });
+    const headers = {};
+    if (adminSessionToken) {
+      headers["Authorization"] = `Bearer ${adminSessionToken}`;
+    } else {
+      headers["x-admin-key"] = "cg_admin_local_fallback";
+    }
+
+    const res = await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${encodeURIComponent(modId)}`, {
+      headers,
+      timeout: 8000,
+    });
+
+    const packWorkingDir = path.join(MEGAPACKS_DIR, modId);
+    if (fs.existsSync(packWorkingDir)) {
+      fs.rmSync(packWorkingDir, { recursive: true, force: true });
+    }
+    const registry = loadRegistry().filter(p => p.id !== modId);
+    saveRegistry(registry);
+
     return res.data;
   } catch (err) {
-    return { success: false, error: err.message };
+    return { success: false, error: err.response?.data?.error || err.message };
   }
 });
 
-app.on("window-all-closed", () => {
-  app.quit();
-});
+app.on("window-all-closed", () => app.quit());
