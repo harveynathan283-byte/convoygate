@@ -11,12 +11,13 @@ const axios = require("axios");
 
 let mainWindow;
 const SERVER_URL = "https://api.convoygate.com";
+const ADMIN_SESSION_FILE = path.join(app.getPath("userData"), "admin_session.json");
 let adminSessionToken = null;
 
-// ConvoyGate Static Master Cipher Key
+// Static DRM Master Key
 const DRM_CIPHER_KEY = Buffer.from([
-  0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61, // "ConvoyGa"
-  0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65  // "teSecure"
+  0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61,
+  0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
 ]);
 
 const MEGAPACKS_DIR = path.join(app.getPath("userData"), "megapacks_storage");
@@ -35,12 +36,34 @@ function saveRegistry(data) {
   fs.writeFileSync(REGISTRY_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
+function loadAdminSession() {
+  try {
+    if (fs.existsSync(ADMIN_SESSION_FILE)) {
+      return JSON.parse(fs.readFileSync(ADMIN_SESSION_FILE, "utf8"));
+    }
+  } catch (e) {}
+  return null;
+}
+
+function saveAdminSession(session) {
+  try {
+    fs.writeFileSync(ADMIN_SESSION_FILE, JSON.stringify(session, null, 2), "utf8");
+  } catch (e) {}
+}
+
+function clearAdminSession() {
+  try {
+    if (fs.existsSync(ADMIN_SESSION_FILE)) fs.unlinkSync(ADMIN_SESSION_FILE);
+  } catch (e) {}
+  adminSessionToken = null;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1080,
-    height: 780,
-    minWidth: 920,
-    minHeight: 620,
+    width: 1140,
+    height: 820,
+    minWidth: 880,
+    minHeight: 580,
     backgroundColor: "#060a12",
     autoHideMenuBar: true,
     webPreferences: {
@@ -54,7 +77,20 @@ function createWindow() {
 
 app.whenReady().then(createWindow);
 
-// --- Discord Admin Authentication ---
+// --- Session Verification & IPC Handlers ---
+ipcMain.handle("get-stored-admin-session", async () => {
+  const session = loadAdminSession();
+  if (!session || !session.token) return { hasSession: false };
+
+  adminSessionToken = session.token;
+  return { hasSession: true, user: session.user, token: session.token };
+});
+
+ipcMain.handle("admin-logout", () => {
+  clearAdminSession();
+  return { success: true };
+});
+
 ipcMain.handle("discord-admin-login", async () => {
   return new Promise((resolve) => {
     const authWin = new BrowserWindow({
@@ -77,8 +113,11 @@ ipcMain.handle("discord-admin-login", async () => {
         const urlObj = new URL(url);
         adminSessionToken = urlObj.searchParams.get("token");
         const username = urlObj.searchParams.get("username");
+        const sessionData = { token: adminSessionToken, user: { username } };
+        
+        saveAdminSession(sessionData);
         authWin.close();
-        resolve({ success: true, user: { username }, token: adminSessionToken });
+        resolve({ success: true, ...sessionData });
       }
     });
 
@@ -90,14 +129,12 @@ ipcMain.handle("discord-admin-login", async () => {
   });
 });
 
-// Encrypt a buffer in place with stream cipher
 function encryptPayload(buffer) {
   for (let i = 0; i < buffer.length; i++) {
     buffer[i] ^= DRM_CIPHER_KEY[i % DRM_CIPHER_KEY.length] ^ (i & 0xFF);
   }
 }
 
-// Scramble an existing SCS/ZIP archive's contents AND headers
 function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
   fs.copyFileSync(inputPath, outputPath);
 
@@ -390,6 +427,15 @@ function streamUploadToBackend(filePath, headers, onProgress) {
       authHeaders["x-admin-key"] = "cg_admin_local_fallback";
     }
 
+    const fileStream = fs.createReadStream(filePath);
+    let settled = false;
+
+    const cleanup = () => {
+      if (fileStream && !fileStream.destroyed) {
+        try { fileStream.destroy(); } catch (e) {}
+      }
+    };
+
     const req = client.request(
       {
         protocol: url.protocol,
@@ -403,25 +449,39 @@ function streamUploadToBackend(filePath, headers, onProgress) {
           ...authHeaders,
           ...headers,
         },
+        timeout: 1800000,
       },
       (res) => {
         let responseBody = "";
         res.on("data", (chunk) => (responseBody += chunk));
         res.on("end", () => {
-          try {
-            resolve(JSON.parse(responseBody));
-          } catch {
-            resolve({ success: res.statusCode >= 200 && res.statusCode < 300, data: responseBody });
+          cleanup();
+          if (!settled) {
+            settled = true;
+            try {
+              resolve(JSON.parse(responseBody));
+            } catch {
+              resolve({ success: res.statusCode >= 200 && res.statusCode < 300, data: responseBody });
+            }
           }
         });
       }
     );
 
-    req.on("error", (err) => reject(err));
+    req.on("timeout", () => {
+      cleanup();
+      req.destroy(new Error("Upload request timed out after 30 minutes"));
+    });
 
-    const fileStream = fs.createReadStream(filePath);
+    req.on("error", (err) => {
+      cleanup();
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+
     let bytesSent = 0;
-
     const progressTransform = new Transform({
       transform(chunk, encoding, callback) {
         bytesSent += chunk.length;
@@ -430,7 +490,13 @@ function streamUploadToBackend(filePath, headers, onProgress) {
       },
     });
 
-    pipeline(fileStream, progressTransform, req).catch((err) => reject(err));
+    pipeline(fileStream, progressTransform, req).catch((err) => {
+      cleanup();
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
   });
 }
 
@@ -507,13 +573,15 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
       return { success: false, error: "No files provided." };
     }
 
+    const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
     if (!isMegaPack) {
       const filePath = filePaths[0];
       const modId = payload.modId;
       const modName = payload.name;
       const stat = fs.statSync(filePath);
 
-      tmpFinalScs = path.join(os.tmpdir(), `${modId}_locked.scs`);
+      tmpFinalScs = path.join(os.tmpdir(), `${modId}_${uniqueSuffix}_locked.scs`);
 
       if (stat.isFile()) {
         sendStatus("Encrypting 3D assets & obfuscating headers...", 0);
@@ -542,7 +610,6 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         }
       );
 
-      if (fs.existsSync(tmpFinalScs)) fs.unlinkSync(tmpFinalScs);
       return result;
 
     } else {
@@ -583,7 +650,7 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
       sendStatus("Generating master ATS Mega Pack manifest...", 60);
       updateMegaPackManifest(packWorkingDir, megaPackName, version, packEntry.files);
 
-      tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_megapack_locked.scs`);
+      tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_${uniqueSuffix}_megapack_locked.scs`);
       sendStatus("Encrypting combined Mega Pack assets...", 70);
       packFolderEncrypted(packWorkingDir, tmpFinalScs, (curr, total) => {
         sendStatus(`Encrypting Mega Pack: ${curr}/${total} files...`);
@@ -604,13 +671,17 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         }
       );
 
-      if (fs.existsSync(tmpFinalScs)) fs.unlinkSync(tmpFinalScs);
       return result;
     }
 
   } catch (err) {
-    if (tmpFinalScs && fs.existsSync(tmpFinalScs)) fs.unlinkSync(tmpFinalScs);
     return { success: false, error: err.message };
+  } finally {
+    if (tmpFinalScs && fs.existsSync(tmpFinalScs)) {
+      try {
+        fs.unlinkSync(tmpFinalScs);
+      } catch (e) {}
+    }
   }
 });
 

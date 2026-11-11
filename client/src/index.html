@@ -16,6 +16,7 @@
       --text-muted: #8493ad;
       --accent-cyan: #00a2ff;
       --accent-cyan-hover: #38bdf8;
+      --accent-purple: #9333ea;
       --success: #10b981;
       --warning: #f59e0b;
       --danger: #ef4444;
@@ -27,6 +28,22 @@
       box-sizing: border-box;
       margin: 0;
       padding: 0;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #070c18;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #172542;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #233760;
     }
 
     body {
@@ -330,11 +347,22 @@
       background: var(--accent-cyan-hover);
     }
 
-    /* --- View Containers --- */
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--danger);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+    }
+
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.3);
+    }
+
+    /* --- View Containers with Independent Scrolling --- */
     .view-content {
       flex: 1;
       display: none;
-      overflow: hidden;
+      overflow-y: auto;
+      overflow-x: hidden;
     }
 
     .view-content.active {
@@ -346,6 +374,7 @@
       display: flex;
       width: 100%;
       height: 100%;
+      min-height: 480px;
     }
 
     .catalog-sidebar {
@@ -465,7 +494,7 @@
       border: 1px solid rgba(148, 163, 184, 0.2);
     }
 
-    /* --- Mod Detail Inspector --- */
+    /* --- Mod Detail Inspector (Scrollable) --- */
     .mod-detail-pane {
       flex: 1;
       overflow-y: auto;
@@ -477,7 +506,7 @@
 
     .hero-banner {
       width: 100%;
-      height: 200px;
+      height: 220px;
       border-radius: 10px;
       position: relative;
       overflow: hidden;
@@ -486,6 +515,7 @@
       display: flex;
       align-items: flex-end;
       padding: 20px;
+      flex-shrink: 0;
     }
 
     .hero-banner-img {
@@ -504,7 +534,7 @@
       left: 0;
       width: 100%;
       height: 100%;
-      background: linear-gradient(180deg, rgba(6,10,18,0.1) 0%, rgba(6,10,18,0.95) 100%);
+      background: linear-gradient(180deg, rgba(6,10,18,0.2) 0%, rgba(6,10,18,0.96) 100%);
     }
 
     .hero-content {
@@ -514,6 +544,7 @@
       display: flex;
       align-items: flex-end;
       justify-content: space-between;
+      gap: 16px;
     }
 
     .hero-info h2 {
@@ -526,6 +557,33 @@
       font-size: 0.8rem;
       color: #94a3b8;
       margin-top: 4px;
+    }
+
+    .single-mod-description-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 16px 20px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .single-mod-description-box h4 {
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .single-mod-description-text {
+      font-size: 0.85rem;
+      color: #cbd5e1;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      max-height: 240px;
+      overflow-y: auto;
     }
 
     .file-table-container {
@@ -564,14 +622,15 @@
       color: #e2e8f0;
     }
 
-    /* --- Settings & Directories View --- */
+    /* --- Settings & Directories View (Scrollable) --- */
     .settings-pane {
       width: 100%;
-      max-width: 720px;
-      margin: 30px auto;
+      max-width: 740px;
+      margin: 20px auto;
+      padding: 10px 20px 40px 20px;
       display: flex;
       flex-direction: column;
-      gap: 24px;
+      gap: 20px;
     }
 
     .settings-card {
@@ -636,6 +695,7 @@
       font-size: 0.75rem;
       color: var(--text-muted);
       margin-top: 2px;
+      margin-bottom: 0;
     }
 
     .switch {
@@ -700,7 +760,10 @@
       font-size: 0.8rem;
       color: var(--accent-cyan);
       font-weight: 600;
-      min-width: 220px;
+      min-width: 240px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .bar-bg {
@@ -818,9 +881,15 @@
             </div>
           </div>
 
+          <!-- Single Mod Rich Description Box -->
+          <div class="single-mod-description-box" id="singleModDescriptionBox">
+            <h4>Mod Description</h4>
+            <div class="single-mod-description-text" id="singleModDescriptionText"></div>
+          </div>
+
           <div class="file-table-container">
             <div class="file-header">
-              <span>PACKAGE CONTENTS</span>
+              <span id="fileTableHeaderLabel">PACKAGE CONTENTS</span>
               <span>VERSION & INTEGRITY</span>
             </div>
             <div id="fileTableRows"></div>
@@ -848,7 +917,7 @@
       </div>
     </section>
 
-    <!-- VIEW 3: Settings & Custom Directories -->
+    <!-- VIEW 3: Settings & Custom Directories (Now Fully Scrollable) -->
     <section class="view-content" id="viewSettings">
       <div class="settings-pane">
         
@@ -871,12 +940,34 @@
         </div>
 
         <div class="settings-card">
-          <h3>Automation Preferences</h3>
-          <p>Configure automated client maintenance behaviors.</p>
+          <h3>Automation & Background Preferences</h3>
+          <p>Configure automated client maintenance and background synchronization behaviors.</p>
 
           <div class="toggle-row">
             <div class="toggle-info">
-              <h4>Auto-Update Mods</h4>
+              <h4>Start with Windows</h4>
+              <p>Automatically launch ConvoyGate minimized on Windows boot so mods stay fresh.</p>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggleStartOnBoot" onchange="saveSettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <h4>Background Auto-Sync (Keep Updated When Closed)</h4>
+              <p>Minimize to System Tray and silently keep game mods up to date.</p>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggleBackgroundSync" onchange="saveSettings()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <h4>Auto-Update Existing Mods</h4>
               <p>Automatically replace local mod files when updates are published to the catalog.</p>
             </div>
             <label class="switch">
@@ -897,12 +988,30 @@
           </div>
         </div>
 
+        <!-- NEW: Maintenance / Clean Uninstall Card -->
+        <div class="settings-card" style="border-color: rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.04);">
+          <h3 style="color: var(--danger);">Game Mod Maintenance</h3>
+          <p>Purge all ConvoyGate encrypted mod packages from your ATS/ETS2 mod directories.</p>
+          
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <h4>Uninstall All Installed Mods</h4>
+              <p>Deletes all downloaded ConvoyGate <code>.scs</code> files from your mod directory cleanly.</p>
+            </div>
+            <button class="btn btn-danger" onclick="confirmUninstallAll()">🗑️ Uninstall All Mods</button>
+          </div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; padding-bottom: 20px;">
+          <button class="btn btn-secondary" onclick="logoutDiscord()">🚪 Log Out of Discord</button>
+        </div>
+
       </div>
     </section>
 
     <!-- Global Progress Bar Footer -->
     <footer class="progress-footer">
-      <div class="progress-text" id="footerProgressText">Awaiting Discord Authentication...</div>
+      <div class="progress-text" id="footerProgressText">Ready</div>
       <div class="bar-bg">
         <div class="bar-fill" id="footerProgressBar"></div>
       </div>
@@ -916,6 +1025,15 @@
     let catalogMods = [];
     let selectedMod = null;
     let localInstalledMap = {};
+
+    const defaultHeroImage = "https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=900&auto=format&fit=crop&q=80";
+
+    function isMegaPack(mod) {
+      if (!mod) return false;
+      const id = (mod.id || "").toLowerCase();
+      const name = (mod.name || "").toLowerCase();
+      return id.includes("megapack") || name.includes("mega pack") || mod.tier === "MegaPack";
+    }
 
     async function startDiscordLogin() {
       const btn = document.getElementById("btnDiscordLogin");
@@ -946,6 +1064,15 @@
       }
     }
 
+    async function logoutDiscord() {
+      await ipcRenderer.invoke("logout");
+      document.getElementById("loginOverlay").style.display = "flex";
+      const btn = document.getElementById("btnDiscordLogin");
+      btn.innerText = "Log In with Discord";
+      btn.style.opacity = "1";
+      btn.style.pointerEvents = "auto";
+    }
+
     function switchTab(tabId) {
       document.querySelectorAll(".nav-item").forEach(item => item.classList.remove("active"));
       document.querySelectorAll(".view-content").forEach(view => view.classList.remove("active"));
@@ -971,16 +1098,28 @@
     }
 
     async function initApp() {
+      // 1. Persistent session check
+      const stored = await ipcRenderer.invoke("get-stored-session");
+      if (stored && stored.hasSession && stored.session?.user) {
+        document.getElementById("loginOverlay").style.display = "none";
+        document.getElementById("discordTag").innerText = stored.session.user.username;
+        document.getElementById("avatarImg").innerText = stored.session.user.username.charAt(0).toUpperCase();
+      } else {
+        document.getElementById("loginOverlay").style.display = "flex";
+        return;
+      }
+
       const hwid = await ipcRenderer.invoke("get-hwid");
       document.getElementById("hwidText").innerText = `HWID: ${hwid.substring(0, 14)}...`;
 
       const settings = await ipcRenderer.invoke("load-settings");
       document.getElementById("inputModDir").value = settings.modDir;
       document.getElementById("inputGameDir").value = settings.gameDir;
+      document.getElementById("toggleStartOnBoot").checked = settings.startOnBoot !== false;
+      document.getElementById("toggleBackgroundSync").checked = settings.backgroundSync !== false;
       document.getElementById("toggleAutoUpdate").checked = !!settings.autoUpdate;
       document.getElementById("toggleAutoInstall").checked = !!settings.autoInstall;
 
-      // AUTOMATIC: Audit and auto-install plugin on every boot/reopen
       setFooter("Verifying ATS anti-tamper plugin hook...", 10);
       const pluginAudit = await ipcRenderer.invoke("audit-plugin");
       if (!pluginAudit.valid) {
@@ -1002,6 +1141,9 @@
 
         if (catalogMods.length > 0 && !selectedMod) {
           selectMod(catalogMods[0]);
+        } else if (selectedMod) {
+          const fresh = catalogMods.find(m => m.id === selectedMod.id);
+          if (fresh) selectMod(fresh);
         }
         setFooter("Catalog synced & verified.", 100);
       } else {
@@ -1029,9 +1171,10 @@
       modsToRender.forEach(mod => {
         const isInstalled = localInstalledMap[mod.id]?.installed;
         const needsUpdate = localInstalledMap[mod.id]?.needsUpdate;
+        const isMega = isMegaPack(mod);
 
         let badgeClass = "badge-missing";
-        let badgeText = "Not Installed";
+        let badgeText = isMega ? "Mega Pack" : "Not Installed";
 
         if (isInstalled && !needsUpdate) {
           badgeClass = "badge-installed";
@@ -1045,8 +1188,10 @@
         card.className = "mod-card" + (selectedMod?.id === mod.id ? " active" : "");
         card.onclick = () => selectMod(mod);
 
+        const iconSrc = mod.iconBase64 || "https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=120&auto=format&fit=crop&q=60";
+
         card.innerHTML = `
-          <img class="mod-thumb" src="https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=120&auto=format&fit=crop&q=60" alt="icon">
+          <img class="mod-thumb" src="${iconSrc}" alt="icon" onerror="this.src='https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=120&auto=format&fit=crop&q=60'">
           <div class="mod-card-meta">
             <h4>${mod.name}</h4>
             <p>${(mod.file_size / 1024 / 1024).toFixed(1)} MB • v${mod.version}</p>
@@ -1057,13 +1202,12 @@
       });
     }
 
-    function selectMod(mod) {
+    async function selectMod(mod) {
       selectedMod = mod;
       filterMods();
 
       document.getElementById("detailTitle").innerText = mod.name;
-      document.getElementById("detailSubtitle").innerText = `Package slug: ${mod.id} • Access Tier: ${mod.tier}`;
-      document.getElementById("heroImage").src = "https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=900&auto=format&fit=crop&q=80";
+      document.getElementById("detailSubtitle").innerText = `Package slug: ${mod.id} • Access Tier: ${mod.tier || "All"}`;
 
       const isInstalled = localInstalledMap[mod.id]?.installed;
       const needsUpdate = localInstalledMap[mod.id]?.needsUpdate;
@@ -1080,13 +1224,47 @@
         btn.className = "btn btn-primary";
       }
 
+      const isMega = isMegaPack(mod);
+      const descBox = document.getElementById("singleModDescriptionBox");
+      const descText = document.getElementById("singleModDescriptionText");
+      const heroImg = document.getElementById("heroImage");
       const rows = document.getElementById("fileTableRows");
-      rows.innerHTML = `
-        <div class="file-row">
-          <span class="file-name">${mod.id}.scs</span>
-          <span style="font-size: 0.8rem; color: #94a3b8;">${(mod.file_size / 1024 / 1024).toFixed(2)} MB • Secure Stream</span>
-        </div>
-      `;
+      const headerLabel = document.getElementById("fileTableHeaderLabel");
+
+      if (isMega) {
+        // Keep Mega Packs as they are
+        descBox.style.display = "none";
+        heroImg.src = defaultHeroImage;
+        headerLabel.innerText = "MEGA PACK CONTENTS";
+
+        rows.innerHTML = `
+          <div class="file-row">
+            <span class="file-name">${mod.id}.scs</span>
+            <span style="font-size: 0.8rem; color: #94a3b8;">${(mod.file_size / 1024 / 1024).toFixed(2)} MB • Merged Archive</span>
+          </div>
+        `;
+      } else {
+        // Single Mod: Fetch and display icon and description
+        headerLabel.innerText = "PACKAGE METADATA";
+        rows.innerHTML = `
+          <div class="file-row">
+            <span class="file-name">${mod.id}.scs</span>
+            <span style="font-size: 0.8rem; color: #94a3b8;">${(mod.file_size / 1024 / 1024).toFixed(2)} MB • Protected Asset</span>
+          </div>
+        `;
+
+        // Load metadata from backend / local archive
+        const details = await ipcRenderer.invoke("get-single-mod-details", mod);
+        if (details && details.iconBase64) {
+          heroImg.src = details.iconBase64;
+          mod.iconBase64 = details.iconBase64;
+        } else {
+          heroImg.src = defaultHeroImage;
+        }
+
+        descBox.style.display = "flex";
+        descText.innerText = details?.description || "No description provided with this mod.";
+      }
     }
 
     async function installSelectedMod() {
@@ -1113,6 +1291,20 @@
       }
     }
 
+    async function confirmUninstallAll() {
+      if (!confirm("Are you sure you want to uninstall ALL ConvoyGate mods? This will delete all downloaded .scs mod files from your game folder.")) {
+        return;
+      }
+      setFooter("Purging all installed ConvoyGate mods...", 30);
+      const res = await ipcRenderer.invoke("uninstall-all-mods");
+      if (res && res.success) {
+        setFooter(`Successfully uninstalled ${res.removedCount} mod packages!`, 100);
+        await loadCatalog();
+      } else {
+        setFooter(`Uninstall failed: ${res ? res.error : "Unknown error"}`, 0);
+      }
+    }
+
     async function browseDirectory(type) {
       const selectedPath = await ipcRenderer.invoke("dialog-browse-dir", type);
       if (selectedPath) {
@@ -1126,6 +1318,8 @@
       const settings = {
         modDir: document.getElementById("inputModDir").value,
         gameDir: document.getElementById("inputGameDir").value,
+        startOnBoot: document.getElementById("toggleStartOnBoot").checked,
+        backgroundSync: document.getElementById("toggleBackgroundSync").checked,
         autoUpdate: document.getElementById("toggleAutoUpdate").checked,
         autoInstall: document.getElementById("toggleAutoInstall").checked,
       };
@@ -1162,6 +1356,12 @@
     ipcRenderer.on("queue-progress", (event, data) => {
       setFooter(data.message, data.percent);
     });
+
+    ipcRenderer.on("sync-completed", () => {
+      loadCatalog();
+    });
+
+    initApp();
   </script>
 </body>
 </html>

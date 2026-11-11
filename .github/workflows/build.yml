@@ -1,0 +1,61 @@
+name: Build ConvoyGate Installers
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 1. BUILD ADMIN INSTALLER
+      - name: Build Admin Installer
+        run: |
+          cd admin-dashboard
+          npm install
+          npm run build:win
+
+      # 2. BUILD CLIENT INSTALLER
+      - name: Build Client Installer
+        run: |
+          cd client
+          npm install
+          npm run build:win
+
+      # 3. COMPRESS ARTIFACTS INTO SEPARATE ZIP PACKAGES
+      - name: Package Admin ZIP
+        shell: pwsh
+        run: |
+          mkdir dist_zip
+          Compress-Archive -Path "admin-dashboard/dist/*Setup*.exe" -DestinationPath "dist_zip/ConvoyGate-Admin-Setup.zip"
+
+      - name: Package Client ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "client/dist/*Setup*.exe" -DestinationPath "dist_zip/ConvoyGate-Client-Setup.zip"
+
+      # 4. UPLOAD ADMIN ARTIFACT
+      - name: Upload Admin Setup Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConvoyGate-Admin-Installer
+          path: dist_zip/ConvoyGate-Admin-Setup.zip
+
+      # 5. UPLOAD CLIENT ARTIFACT
+      - name: Upload Client Setup Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConvoyGate-Client-Installer
+          path: dist_zip/ConvoyGate-Client-Setup.zip
