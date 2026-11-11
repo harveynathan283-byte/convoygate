@@ -917,13 +917,13 @@
       </div>
     </section>
 
-    <!-- VIEW 3: Settings & Custom Directories (Fully Scrollable) -->
+    <!-- VIEW 3: Settings & Custom Directories -->
     <section class="view-content" id="viewSettings">
       <div class="settings-pane">
         
         <div class="settings-card">
           <h3>Mod File Directory</h3>
-          <p>Location where your encrypted <code>.scs</code> mods are placed for ATS to detect them.</p>
+          <p>Location where your <code>.scs</code> mods are placed for ATS to detect them.</p>
           <div class="dir-input-group">
             <input type="text" id="inputModDir" readonly>
             <button class="btn btn-secondary" onclick="browseDirectory('mod')">Change...</button>
@@ -991,7 +991,7 @@
         <!-- Maintenance / Clean Uninstall Card -->
         <div class="settings-card" style="border-color: rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.04);">
           <h3 style="color: var(--danger);">Game Mod Maintenance</h3>
-          <p>Purge all ConvoyGate encrypted mod packages from your ATS/ETS2 mod directories.</p>
+          <p>Purge all ConvoyGate mod packages from your ATS mod directory.</p>
           
           <div class="toggle-row">
             <div class="toggle-info">
@@ -1126,7 +1126,7 @@
       document.getElementById("inputGameDir").value = settings.gameDir;
       document.getElementById("toggleStartOnBoot").checked = settings.startOnBoot !== false;
       document.getElementById("toggleBackgroundSync").checked = settings.backgroundSync !== false;
-      document.getElementById("toggleAutoUpdate").checked = !!settings.autoUpdate;
+      document.getElementById("toggleAutoUpdate").checked = settings.autoUpdate !== false;
       document.getElementById("toggleAutoInstall").checked = !!settings.autoInstall;
 
       setFooter("Verifying ATS anti-tamper plugin hook...", 10);
@@ -1200,10 +1200,10 @@
         const iconSrc = mod.iconBase64 || "https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=120&auto=format&fit=crop&q=60";
 
         card.innerHTML = `
-          <img class="mod-thumb" src="${iconSrc}" alt="icon" onerror="this.src='https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=120&auto=format&fit=crop&q=60'">
+          <img class="mod-thumb" id="list_thumb_${mod.id}" src="${iconSrc}" alt="icon" onerror="this.src='https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=120&auto=format&fit=crop&q=60'">
           <div class="mod-card-meta">
             <h4>${mod.name}</h4>
-            <p>${(mod.file_size / 1024 / 1024).toFixed(1)} MB • v${mod.version}</p>
+            <p>${(Number(mod.file_size || mod.size || 0) / 1024 / 1024).toFixed(1)} MB • v${mod.version}</p>
           </div>
           <span class="status-badge ${badgeClass}">${badgeText}</span>
         `;
@@ -1248,7 +1248,7 @@
         rows.innerHTML = `
           <div class="file-row">
             <span class="file-name">${mod.id}.scs</span>
-            <span style="font-size: 0.8rem; color: #94a3b8;">${(mod.file_size / 1024 / 1024).toFixed(2)} MB • Merged Archive</span>
+            <span style="font-size: 0.8rem; color: #94a3b8;">${(Number(mod.file_size || mod.size || 0) / 1024 / 1024).toFixed(2)} MB • Merged Archive</span>
           </div>
         `;
       } else {
@@ -1256,7 +1256,7 @@
         rows.innerHTML = `
           <div class="file-row">
             <span class="file-name">${mod.id}.scs</span>
-            <span style="font-size: 0.8rem; color: #94a3b8;">${(mod.file_size / 1024 / 1024).toFixed(2)} MB • Protected Asset</span>
+            <span style="font-size: 0.8rem; color: #94a3b8;">${(Number(mod.file_size || mod.size || 0) / 1024 / 1024).toFixed(2)} MB • Protected Asset</span>
           </div>
         `;
 
@@ -1264,6 +1264,8 @@
         if (details && details.iconBase64) {
           heroImg.src = details.iconBase64;
           mod.iconBase64 = details.iconBase64;
+          const thumbEl = document.getElementById(`list_thumb_${mod.id}`);
+          if (thumbEl) thumbEl.src = details.iconBase64;
         } else {
           heroImg.src = defaultHeroImage;
         }
@@ -1330,7 +1332,7 @@
         autoInstall: document.getElementById("toggleAutoInstall").checked,
       };
       await ipcRenderer.invoke("save-settings", settings);
-      setFooter("Settings & directories updated.", 100);
+      setFooter("Settings updated. Synchronizing changes...", 100);
     }
 
     async function auditPlugin() {
@@ -1359,6 +1361,7 @@
       document.getElementById("footerProgressBar").style.width = percent + "%";
     }
 
+    // Active live listeners for automatic background updates and downloads
     ipcRenderer.on("queue-progress", (event, data) => {
       setFooter(data.message, data.percent);
     });
