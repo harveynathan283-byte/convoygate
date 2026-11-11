@@ -28,6 +28,7 @@
       padding: 0;
     }
 
+    /* Custom Sleek Scrollbars */
     ::-webkit-scrollbar {
       width: 8px;
       height: 8px;
@@ -54,6 +55,7 @@
       user-select: none;
     }
 
+    /* Full Viewport Scrolling Container */
     .admin-viewport {
       flex: 1;
       overflow-y: auto;
@@ -64,6 +66,7 @@
       gap: 20px;
     }
 
+    /* Persistent Discord Admin Overlay */
     .login-overlay {
       position: fixed;
       top: 0;
@@ -286,6 +289,61 @@
     }
     .btn-danger:hover {
       background: rgba(239, 68, 68, 0.3);
+    }
+
+    /* Live Upload Progress Card */
+    .upload-progress-card {
+      display: none;
+      background: var(--bg-surface);
+      border: 1px solid var(--accent-cyan);
+      box-shadow: 0 4px 20px rgba(0, 162, 255, 0.15);
+      border-radius: 10px;
+      padding: 16px 20px;
+      flex-direction: column;
+      gap: 10px;
+      flex-shrink: 0;
+      animation: fadeIn 0.2s ease;
+    }
+
+    .upload-progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .upload-status-title {
+      color: #e2e8f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+      margin-right: 12px;
+    }
+
+    .upload-status-pct {
+      color: var(--accent-cyan);
+      font-family: monospace;
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      background: #09101e;
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #9333ea, var(--accent-cyan));
+      border-radius: 5px;
+      transition: width 0.15s ease;
     }
 
     .alert-banner {
@@ -546,6 +604,17 @@
       <button class="btn btn-primary" onclick="loadCatalog()">🔄 Refresh Catalog</button>
     </div>
 
+    <!-- Live Uploading Progress Card with Percent & MBs -->
+    <div class="upload-progress-card" id="uploadProgressCard">
+      <div class="upload-progress-header">
+        <div class="upload-status-title" id="uploadStatusText">Preparing package...</div>
+        <div class="upload-status-pct" id="uploadStatusPct">0%</div>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" id="uploadProgressBar"></div>
+      </div>
+    </div>
+
     <div class="alert-banner" id="alertBanner"></div>
 
     <section class="catalog-section">
@@ -671,6 +740,11 @@
     const btnAdminDiscordLogin = document.getElementById("btnAdminDiscordLogin");
     const adminLoginError = document.getElementById("adminLoginError");
 
+    const uploadProgressCard = document.getElementById("uploadProgressCard");
+    const uploadStatusText = document.getElementById("uploadStatusText");
+    const uploadStatusPct = document.getElementById("uploadStatusPct");
+    const uploadProgressBar = document.getElementById("uploadProgressBar");
+
     const publishModal = document.getElementById("publishModal");
     const queueBadge = document.getElementById("queueBadge");
     const selectPackageType = document.getElementById("selectPackageType");
@@ -689,6 +763,7 @@
 
     let queuedFiles = [];
     let currentQueueIndex = 0;
+    let collectedQueue = [];
     let knownMegaPacks = [];
     let activeManagePackId = null;
 
@@ -767,6 +842,7 @@
     async function openPublishModal(paths) {
       queuedFiles = paths;
       currentQueueIndex = 0;
+      collectedQueue = [];
       knownMegaPacks = await ipcRenderer.invoke("get-megapacks");
       populateMegaPackSelect();
 
@@ -797,7 +873,7 @@
         onMegaPackTargetChange();
       } else if (isQueue) {
         queueBadge.style.display = "block";
-        queueBadge.innerText = `Queue Step: Mod ${currentQueueIndex + 1} of ${queuedFiles.length}`;
+        queueBadge.innerText = `Configure Mod ${currentQueueIndex + 1} of ${queuedFiles.length}`;
         selectedFilesGroup.style.display = "none";
         megaPackSection.style.display = "none";
         singleNameGroup.style.display = "flex";
@@ -808,9 +884,8 @@
         document.getElementById("lblDisplayName").innerText = `Display Name (${currentQueueIndex + 1}/${queuedFiles.length}: ${pathBase(currentFilePath)})`;
 
         const isLast = currentQueueIndex === queuedFiles.length - 1;
-        btnConfirmPublish.innerText = isLast ? "Publish Final Mod" : `Publish & Next (${currentQueueIndex + 1}/${queuedFiles.length})`;
+        btnConfirmPublish.innerText = isLast ? "Encrypt & Publish All Mods" : `Next Mod (${currentQueueIndex + 1}/${queuedFiles.length}) →`;
       } else {
-        // Single dropped item
         queueBadge.style.display = "none";
         selectedFilesGroup.style.display = "flex";
         megaPackSection.style.display = "none";
@@ -850,14 +925,39 @@
       publishModal.style.display = "none";
       queuedFiles = [];
       currentQueueIndex = 0;
+      collectedQueue = [];
+    }
+
+    function showUploadCard(initialMessage) {
+      alertBanner.style.display = "none";
+      uploadProgressCard.style.display = "flex";
+      uploadStatusText.innerText = initialMessage;
+      uploadStatusPct.innerText = "0%";
+      uploadProgressBar.style.width = "0%";
+      uploadProgressBar.style.background = "linear-gradient(90deg, #9333ea, var(--accent-cyan))";
+    }
+
+    function updateUploadCard(message, percent) {
+      uploadStatusText.innerText = message;
+      if (typeof percent === "number") {
+        uploadStatusPct.innerText = `${percent}%`;
+        uploadProgressBar.style.width = `${percent}%`;
+      }
+    }
+
+    function hideUploadCard() {
+      uploadProgressCard.style.display = "none";
     }
 
     async function submitPublish() {
       const isMega = selectPackageType.value === "megapack";
-      const version = document.getElementById("inputVersion").value || "1.0.0";
-      const tier = document.getElementById("selectTier").value || "All";
+      const isQueue = !isMega && queuedFiles.length > 1;
 
       if (isMega) {
+        const filesToPublish = [...queuedFiles];
+        const version = document.getElementById("inputVersion").value || "1.0.0";
+        const tier = document.getElementById("selectTier").value || "All";
+
         let megaPackName = "";
         let megaPackId = "";
         const isNew = selectMegaPackTarget.value === "__new__";
@@ -875,12 +975,15 @@
           megaPackName = found ? found.name : megaPackId;
         }
 
+        // 1. Immediately close the popup
         closeModal();
-        showAlert("Assembling, encrypting, and uploading Mega Pack...", "info");
+
+        // 2. Display the progress bar in the main window
+        showUploadCard(`Assembling & encrypting Mega Pack: ${megaPackName}...`);
 
         const res = await ipcRenderer.invoke("publish-package-adaptive", {
           isMegaPack: true,
-          filePaths: queuedFiles,
+          filePaths: filesToPublish,
           megaPackId,
           megaPackName,
           version,
@@ -888,16 +991,83 @@
         });
 
         if (res && res.success) {
+          updateUploadCard(`Uploaded: 100% - Mega Pack ${megaPackName} live!`, 100);
+          uploadProgressBar.style.background = "#10b981";
+          setTimeout(hideUploadCard, 4000);
           showAlert(`Successfully published Mega Pack: ${megaPackName}`, "success");
           await loadCatalog();
         } else {
+          hideUploadCard();
           showAlert(`Failed to publish: ${res ? res.error : "Unknown error"}`, "error");
         }
 
-      } else {
-        // Single Mod Queue Item
+      } else if (isQueue) {
+        // Collect current step's parameters
         const currentFile = queuedFiles[currentQueueIndex];
         const name = document.getElementById("inputDisplayName").value.trim();
+        const version = document.getElementById("inputVersion").value || "1.0.0";
+        const tier = document.getElementById("selectTier").value || "All";
+
+        if (!name) {
+          alert("Please enter a display name for this mod.");
+          return;
+        }
+
+        collectedQueue.push({
+          filePath: currentFile,
+          name,
+          modId: name.toLowerCase().replace(/[^a-z0-9_-]/g, "_"),
+          version,
+          tier
+        });
+
+        currentQueueIndex++;
+
+        if (currentQueueIndex < queuedFiles.length) {
+          // Advance to configure the next mod
+          setupQueueStep();
+        } else {
+          // All mods configured! Clone queue and immediately close popup
+          const itemsToUpload = [...collectedQueue];
+          closeModal();
+
+          showUploadCard(`Starting batch upload (0/${itemsToUpload.length})...`);
+
+          for (let i = 0; i < itemsToUpload.length; i++) {
+            const item = itemsToUpload[i];
+            updateUploadCard(`[${i + 1}/${itemsToUpload.length}] Securing & uploading ${item.name}...`, 0);
+
+            const res = await ipcRenderer.invoke("publish-package-adaptive", {
+              isMegaPack: false,
+              filePaths: [item.filePath],
+              name: item.name,
+              modId: item.modId,
+              version: item.version,
+              tier: item.tier
+            });
+
+            if (!res || !res.success) {
+              hideUploadCard();
+              showAlert(`Failed on [${i + 1}/${itemsToUpload.length}] ${item.name}: ${res ? res.error : "Unknown error"}`, "error");
+              await loadCatalog();
+              return;
+            }
+          }
+
+          updateUploadCard(`All ${itemsToUpload.length} mods successfully published!`, 100);
+          uploadProgressBar.style.background = "#10b981";
+          setTimeout(hideUploadCard, 4000);
+          showAlert(`All ${itemsToUpload.length} batch mods published successfully!`, "success");
+          await loadCatalog();
+        }
+
+      } else {
+        // Single Mod Drop
+        const singleFile = queuedFiles[0];
+        const name = document.getElementById("inputDisplayName").value.trim();
+        const version = document.getElementById("inputVersion").value || "1.0.0";
+        const tier = document.getElementById("selectTier").value || "All";
+
         if (!name) {
           alert("Please enter a display name for this mod.");
           return;
@@ -905,36 +1075,30 @@
 
         const modId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
 
-        btnConfirmPublish.disabled = true;
-        btnConfirmPublish.innerText = "Publishing...";
-        showAlert(`Publishing [${currentQueueIndex + 1}/${queuedFiles.length}]: ${name}...`, "info");
+        // 1. Immediately close the popup
+        closeModal();
+
+        // 2. Display the progress bar in the main window
+        showUploadCard(`Encrypting & uploading ${name}...`);
 
         const res = await ipcRenderer.invoke("publish-package-adaptive", {
           isMegaPack: false,
-          filePaths: [currentFile],
+          filePaths: [singleFile],
           name,
           modId,
           version,
           tier
         });
 
-        btnConfirmPublish.disabled = false;
-
         if (res && res.success) {
-          showAlert(`Published ${name} successfully!`, "success");
-          currentQueueIndex++;
-
-          if (currentQueueIndex < queuedFiles.length) {
-            // Move to next mod in batch queue
-            setupQueueStep();
-          } else {
-            // Queue complete
-            closeModal();
-            showAlert("All batch mods successfully published!", "success");
-            await loadCatalog();
-          }
+          updateUploadCard(`Uploaded: 100% - ${name} is live!`, 100);
+          uploadProgressBar.style.background = "#10b981";
+          setTimeout(hideUploadCard, 4000);
+          showAlert(`Successfully published: ${name}`, "success");
+          await loadCatalog();
         } else {
-          showAlert(`Failed to publish ${name}: ${res ? res.error : "Unknown error"}`, "error");
+          hideUploadCard();
+          showAlert(`Failed to publish: ${res ? res.error : "Unknown error"}`, "error");
         }
       }
     }
@@ -1014,19 +1178,24 @@
         return;
       }
 
-      showAlert(`Rebuilding Mega Pack without ${fileName}...`, "info");
+      showUploadCard(`Rebuilding Mega Pack without ${fileName}...`);
       const res = await ipcRenderer.invoke("remove-megapack-item", { megaPackId, fileName });
 
       if (res && res.success) {
         if (res.deletedPack) {
+          hideUploadCard();
           showAlert(`All mods removed. Mega Pack deleted cleanly.`, "success");
           closeManageModal();
         } else {
+          updateUploadCard(`Mega Pack updated and re-uploaded successfully!`, 100);
+          uploadProgressBar.style.background = "#10b981";
+          setTimeout(hideUploadCard, 4000);
           showAlert(`Successfully removed ${fileName}! Mega Pack re-synced.`, "success");
           renderSubModsList(res.remainingFiles);
         }
         await loadCatalog();
       } else {
+        hideUploadCard();
         showAlert(`Failed to remove mod: ${res ? res.error : "Unknown error"}`, "error");
       }
     }
@@ -1047,8 +1216,11 @@
       alertBanner.innerText = msg;
     }
 
+    // Real-Time Progress Stream Listener from Electron Backend
     ipcRenderer.on("publish-status", (event, data) => {
-      showAlert(data.message, "info");
+      if (uploadProgressCard.style.display === "flex") {
+        updateUploadCard(data.message, data.percent);
+      }
     });
 
     initAdmin();

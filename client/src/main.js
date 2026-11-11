@@ -9,12 +9,12 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let syncInterval = null;
+let leaseAuditInterval = null;
 
 const SERVER_URL = "https://api.convoygate.com";
 const SESSION_FILE = path.join(app.getPath("userData"), "session.json");
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
 
-// Default paths and settings
 function getDefaultModDir() {
   const home = os.homedir();
   const atsMod = path.join(home, "Documents", "American Truck Simulator", "mod");
@@ -86,96 +86,64 @@ function getHWID() {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
-// Ensure single instance running
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-  app.quit();
-} else {
-  app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  });
-}
+// Active Killswitch & Heartbeat Lease Auditor
+async function auditSubscriberLeaseAndEnforce() {
+  const session = loadSession();
+  const destDir = userSettings.modDir;
+  let isValid = false;
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1080,
-    height: 780,
-    minWidth: 860,
-    minHeight: 580,
-    backgroundColor: "#060a12",
-    autoHideMenuBar: true,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
-  });
-
-  mainWindow.loadFile(path.join(__dirname, "index.html"));
-
- mainWindow.on("close", (event) => {
-    // If user clicked X and app isn't explicitly quitting, minimize to tray
-    if (!isQuitting && userSettings.backgroundSync) {
-      event.preventDefault();
-      mainWindow.hide();
-      if (Notification.isSupported()) {
-        new Notification({
-          title: "ConvoyGate is active",
-          body: "ConvoyGate is running in the system tray to keep your mods updated."
-        }).show();
-      }
-      return false;
-    }
-  });
-
-  // Force close when Windows installer or system shutdown sends termination signals
-  app.on("session-end", () => {
-    isQuitting = true;
-    app.exit(0);
-  });
-}
-
-function createTray() {
-  const iconBase64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAZElEQVQ4T2NkoBAwUqifYdQAHsXIhvoZw5L//xkYGBkZGBmZkSQY8en4//8/A8P///8Z0QVGDRhUBoA0w9SDNCNpgGmGG4BkABkewGkAOR5ACg7UeIDR1IBfPQwzB5u7sRlASvAAq8tF38k5bE0AAAAASUVORK5CYII=";
-  const image = nativeImage.createFromBuffer(Buffer.from(iconBase64, "base64"));
-  
-  tray = new Tray(image);
-  tray.setToolTip("ConvoyGate - Mod Auto-Updater");
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: "Open ConvoyGate",
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
+  if (session && session.token) {
+    try {
+      const res = await axios.post(
+        `${SERVER_URL}/api/v1/license/lease`,
+        { hwid: getHWID() },
+        { headers: { Authorization: `Bearer ${session.token}` }, timeout: 6000 }
+      );
+      if (res.data && res.data.success) {
+        isValid = true;
+        if (fs.existsSync(userSettings.gameDir)) {
+          const keyPath = path.join(userSettings.gameDir, "convoygate.key");
+          fs.writeFileSync(keyPath, JSON.stringify(res.data.lease), "utf8");
         }
       }
-    },
-    {
-      label: "Sync Mods Now",
-      click: () => runSilentBackgroundUpdate(true)
-    },
-    { type: "separator" },
-    {
-      label: "Quit Completely",
-      click: () => {
-        isQuitting = true;
-        app.quit();
+    } catch (err) {
+      isValid = false;
+    }
+  }
+
+  // If subscription or lease is invalid, wipe all mods from disk immediately
+  if (!isValid) {
+    let purged = 0;
+    if (fs.existsSync(destDir)) {
+      const files = fs.readdirSync(destDir);
+      files.forEach((f) => {
+        if (f.endsWith(".scs")) {
+          try {
+            fs.unlinkSync(path.join(destDir, f));
+            purged++;
+          } catch (e) {}
+        }
+      });
+    }
+
+    if (fs.existsSync(userSettings.gameDir)) {
+      const keyPath = path.join(userSettings.gameDir, "convoygate.key");
+      if (fs.existsSync(keyPath)) {
+        try { fs.unlinkSync(keyPath); } catch (e) {}
       }
     }
-  ]);
 
-  tray.setContextMenu(contextMenu);
-  tray.on("double-click", () => {
-    if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
+    if (purged > 0 && Notification.isSupported()) {
+      new Notification({
+        title: "ConvoyGate Access Revoked",
+        body: "Subscriber role or key expired. Protected mods have been removed from your game."
+      }).show();
     }
-  });
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("sync-completed");
+    }
+  }
 }
 
 // Background Silent Mod Updater
@@ -248,11 +216,100 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
   } catch (err) {}
 }
 
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1080,
+    height: 780,
+    minWidth: 860,
+    minHeight: 580,
+    backgroundColor: "#060a12",
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  });
+
+  mainWindow.loadFile(path.join(__dirname, "index.html"));
+
+  mainWindow.on("close", (event) => {
+    if (!isQuitting && userSettings.backgroundSync) {
+      event.preventDefault();
+      mainWindow.hide();
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "ConvoyGate is active",
+          body: "ConvoyGate is running in the system tray to keep your mods updated."
+        }).show();
+      }
+      return false;
+    }
+  });
+}
+
+function createTray() {
+  const iconBase64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAZElEQVQ4T2NkoBAwUqifYdQAHsXIhvoZw5L//xkYGBkZGBmZkSQY8en4//8/A8P///8Z0QVGDRhUBoA0w9SDNCNpgGmGG4BkABkewGkAOR5ACg7UeIDR1IBfPQwzB5u7sRlASvAAq8tF38k5bE0AAAAASUVORK5CYII=";
+  const image = nativeImage.createFromBuffer(Buffer.from(iconBase64, "base64"));
+
+  tray = new Tray(image);
+  tray.setToolTip("ConvoyGate - Mod Auto-Updater");
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: "Open ConvoyGate",
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      }
+    },
+    {
+      label: "Sync Mods Now",
+      click: () => runSilentBackgroundUpdate(true)
+    },
+    { type: "separator" },
+    {
+      label: "Quit Completely",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setContextMenu(contextMenu);
+  tray.on("double-click", () => {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(() => {
   loadSettings();
   createWindow();
   createTray();
 
+  // Audit lease right away and every 60 seconds
+  setTimeout(auditSubscriberLeaseAndEnforce, 2000);
+  leaseAuditInterval = setInterval(auditSubscriberLeaseAndEnforce, 60 * 1000);
+
+  // Background catalog update check
   syncInterval = setInterval(() => {
     if (userSettings.backgroundSync) {
       runSilentBackgroundUpdate(false);
@@ -262,7 +319,6 @@ app.whenReady().then(() => {
   setTimeout(() => runSilentBackgroundUpdate(false), 5000);
 });
 
-// --- DISCORD OAUTH HANDLER (Supports both 'discord-login' and 'discord-client-login') ---
 async function handleDiscordLogin() {
   return new Promise((resolve) => {
     const authWin = new BrowserWindow({
@@ -289,6 +345,7 @@ async function handleDiscordLogin() {
         const sessionData = { token, user: { username } };
         saveSession(sessionData);
         authWin.close();
+        auditSubscriberLeaseAndEnforce();
         resolve({ success: true, ...sessionData });
       }
     });
@@ -313,12 +370,12 @@ ipcMain.handle("get-stored-session", async () => {
 
 ipcMain.handle("logout", () => {
   clearSession();
+  auditSubscriberLeaseAndEnforce();
   return { success: true };
 });
 
 ipcMain.handle("get-hwid", () => getHWID());
 
-// Settings
 ipcMain.handle("load-settings", () => userSettings);
 ipcMain.handle("get-settings", () => userSettings);
 ipcMain.handle("save-settings", (event, newSettings) => {
@@ -330,7 +387,6 @@ ipcMain.handle("update-settings", (event, newSettings) => {
   return userSettings;
 });
 
-// Plugin Hook Audit & Re-injection
 ipcMain.handle("audit-plugin", () => {
   const pluginFile = path.join(userSettings.gameDir, "convoygate.dll");
   const exists = fs.existsSync(pluginFile);
@@ -341,13 +397,10 @@ ipcMain.handle("reinstall-plugin", () => {
   try {
     fs.mkdirSync(userSettings.gameDir, { recursive: true });
     const targetPath = path.join(userSettings.gameDir, "convoygate.dll");
-    
-    // Check for bundled DLL in application directory or create placeholder hook
     const bundledPath = path.join(__dirname, "..", "assets", "convoygate.dll");
     if (fs.existsSync(bundledPath)) {
       fs.copyFileSync(bundledPath, targetPath);
     } else {
-      // Placeholder DLL signature file for dev environments
       fs.writeFileSync(targetPath, Buffer.from("ConvoyGate-Hook-x64"));
     }
     return { success: true, path: targetPath };
@@ -356,7 +409,6 @@ ipcMain.handle("reinstall-plugin", () => {
   }
 });
 
-// Directory Browse Dialog
 ipcMain.handle("dialog-browse-dir", async (event, type) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: type === "mod" ? "Select Mod Directory" : "Select Game Plugins Directory",
@@ -366,7 +418,6 @@ ipcMain.handle("dialog-browse-dir", async (event, type) => {
   return result.filePaths[0];
 });
 
-// Remote Mod Catalog + Local Installed Mapping
 ipcMain.handle("fetch-catalog", async () => {
   try {
     const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
@@ -398,7 +449,6 @@ ipcMain.handle("get-catalog", async () => {
   return await ipcMain.handlers["fetch-catalog"]();
 });
 
-// Single Mod Inspector: Extract icon and description from SCS
 ipcMain.handle("get-single-mod-details", async (event, mod) => {
   const targetPath = path.join(userSettings.modDir, `${mod.id}.scs`);
   let description = `Package: ${mod.name}\nVersion: ${mod.version}\nTier: ${mod.tier || "All Tiers"}\n\nProtected by ConvoyGate Decryption Streaming.`;
@@ -458,7 +508,6 @@ ipcMain.handle("get-single-mod-details", async (event, mod) => {
   return { description, iconBase64 };
 });
 
-// Single Mod Downloader
 ipcMain.handle("install-single-mod", async (event, modId) => {
   const session = loadSession();
   const token = session ? session.token : "";
@@ -496,7 +545,6 @@ ipcMain.handle("download-mod", async (event, modId) => {
   return await ipcMain.handlers["install-single-mod"](event, modId);
 });
 
-// Batch Installer
 ipcMain.handle("install-all-mods", async (event) => {
   const session = loadSession();
   const token = session ? session.token : "";
@@ -511,9 +559,9 @@ ipcMain.handle("install-all-mods", async (event) => {
       const tempFile = path.join(userSettings.modDir, `${mod.id}.scs.download`);
       const pct = Math.round((processed / mods.length) * 100);
 
-      event.sender.send("queue-progress", { 
-        message: `[${processed + 1}/${mods.length}] Downloading ${mod.name}...`, 
-        percent: pct 
+      event.sender.send("queue-progress", {
+        message: `[${processed + 1}/${mods.length}] Downloading ${mod.name}...`,
+        percent: pct
       });
 
       const downloadRes = await axios({
@@ -542,14 +590,12 @@ ipcMain.handle("install-all-mods", async (event) => {
   }
 });
 
-// Uninstall Single Mod
 ipcMain.handle("uninstall-mod", (event, modId) => {
   const p = path.join(userSettings.modDir, `${modId}.scs`);
   if (fs.existsSync(p)) fs.unlinkSync(p);
   return { success: true };
 });
 
-// Uninstall All Mods
 ipcMain.handle("uninstall-all-mods", () => {
   let count = 0;
   if (fs.existsSync(userSettings.modDir)) {
@@ -569,6 +615,11 @@ ipcMain.handle("uninstall-all-mods", () => {
 ipcMain.handle("sync-now", async () => {
   await runSilentBackgroundUpdate(true);
   return { success: true };
+});
+
+app.on("session-end", () => {
+  isQuitting = true;
+  app.exit(0);
 });
 
 app.on("before-quit", () => {
