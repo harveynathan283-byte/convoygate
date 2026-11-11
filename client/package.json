@@ -5,7 +5,8 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win --x64"
+    "build": "electron-builder --win --x64",
+    "build:win": "electron-builder --win --x64"
   },
   "build": {
     "appId": "com.convoygate.client",
