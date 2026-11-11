@@ -661,8 +661,7 @@
       <div class="form-group" id="packageTypeGroup">
         <label>Packaging Mode</label>
         <select id="selectPackageType" onchange="onPackageTypeChange()">
-          <option value="single_queue">Batch Single Mods (Publish Each Individually)</option>
-          <option value="megapack">Mega Pack (Merge into 1 Combined Archive)</option>
+          <!-- Populated dynamically depending on single vs multiple files -->
         </select>
       </div>
 
@@ -848,12 +847,21 @@
 
       modalFileList.innerHTML = paths.map(p => `<div>• ${p.split(/[\\/]/).pop()}</div>`).join("");
 
+      // Always show packaging mode selector
+      packageTypeGroup.style.display = "flex";
+
       if (paths.length > 1) {
-        packageTypeGroup.style.display = "flex";
+        selectPackageType.innerHTML = `
+          <option value="single_queue">Batch Single Mods (Publish Each Individually)</option>
+          <option value="megapack">Mega Pack (Merge into 1 Combined Archive)</option>
+        `;
         selectPackageType.value = "single_queue";
       } else {
-        packageTypeGroup.style.display = "none";
-        selectPackageType.value = "single_queue";
+        selectPackageType.innerHTML = `
+          <option value="single">Single Standalone Mod</option>
+          <option value="megapack">Add to Mega Pack (Merge / Append)</option>
+        `;
+        selectPackageType.value = "single";
       }
 
       setupQueueStep();
@@ -862,14 +870,14 @@
 
     function setupQueueStep() {
       const isMega = selectPackageType.value === "megapack";
-      const isQueue = !isMega && queuedFiles.length > 1;
+      const isQueue = selectPackageType.value === "single_queue" && queuedFiles.length > 1;
 
       if (isMega) {
         queueBadge.style.display = "none";
         selectedFilesGroup.style.display = "flex";
         megaPackSection.style.display = "flex";
         singleNameGroup.style.display = "none";
-        btnConfirmPublish.innerText = "Merge & Publish Mega Pack";
+        btnConfirmPublish.innerText = queuedFiles.length > 1 ? "Merge & Publish Mega Pack" : "Add to Mega Pack & Publish";
         onMegaPackTargetChange();
       } else if (isQueue) {
         queueBadge.style.display = "block";
@@ -886,6 +894,7 @@
         const isLast = currentQueueIndex === queuedFiles.length - 1;
         btnConfirmPublish.innerText = isLast ? "Encrypt & Publish All Mods" : `Next Mod (${currentQueueIndex + 1}/${queuedFiles.length}) →`;
       } else {
+        // Single standalone mod
         queueBadge.style.display = "none";
         selectedFilesGroup.style.display = "flex";
         megaPackSection.style.display = "none";
@@ -951,7 +960,7 @@
 
     async function submitPublish() {
       const isMega = selectPackageType.value === "megapack";
-      const isQueue = !isMega && queuedFiles.length > 1;
+      const isQueue = selectPackageType.value === "single_queue" && queuedFiles.length > 1;
 
       if (isMega) {
         const filesToPublish = [...queuedFiles];
@@ -975,10 +984,7 @@
           megaPackName = found ? found.name : megaPackId;
         }
 
-        // 1. Immediately close the popup
         closeModal();
-
-        // 2. Display the progress bar in the main window
         showUploadCard(`Assembling & encrypting Mega Pack: ${megaPackName}...`);
 
         const res = await ipcRenderer.invoke("publish-package-adaptive", {
@@ -1002,7 +1008,6 @@
         }
 
       } else if (isQueue) {
-        // Collect current step's parameters
         const currentFile = queuedFiles[currentQueueIndex];
         const name = document.getElementById("inputDisplayName").value.trim();
         const version = document.getElementById("inputVersion").value || "1.0.0";
@@ -1024,10 +1029,8 @@
         currentQueueIndex++;
 
         if (currentQueueIndex < queuedFiles.length) {
-          // Advance to configure the next mod
           setupQueueStep();
         } else {
-          // All mods configured! Clone queue and immediately close popup
           const itemsToUpload = [...collectedQueue];
           closeModal();
 
@@ -1062,7 +1065,7 @@
         }
 
       } else {
-        // Single Mod Drop
+        // Single Mod Drop (Standalone)
         const singleFile = queuedFiles[0];
         const name = document.getElementById("inputDisplayName").value.trim();
         const version = document.getElementById("inputVersion").value || "1.0.0";
@@ -1075,10 +1078,7 @@
 
         const modId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
 
-        // 1. Immediately close the popup
         closeModal();
-
-        // 2. Display the progress bar in the main window
         showUploadCard(`Encrypting & uploading ${name}...`);
 
         const res = await ipcRenderer.invoke("publish-package-adaptive", {
@@ -1143,7 +1143,6 @@
       }
     }
 
-    // Sub-Mod Management: Inspect and remove mods inside Mega Packs
     function openMegaPackManager(megaPackId, unescapedName) {
       activeManagePackId = megaPackId;
       const packName = unescape(unescapedName);
@@ -1216,7 +1215,6 @@
       alertBanner.innerText = msg;
     }
 
-    // Real-Time Progress Stream Listener from Electron Backend
     ipcRenderer.on("publish-status", (event, data) => {
       if (uploadProgressCard.style.display === "flex") {
         updateUploadCard(data.message, data.percent);

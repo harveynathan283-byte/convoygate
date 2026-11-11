@@ -7,6 +7,7 @@
 #include <sstream>
 #include <ctime>
 #include <cctype>
+#include <algorithm>
 #include <unordered_map>
 
 #pragma comment(lib, "advapi32.lib")
@@ -46,7 +47,6 @@ std::string GetPluginDirectory() {
     return ".\\";
 }
 
-// 1. Registry MachineGuid
 std::string GetSystemMachineGuid() {
     HKEY hKey;
     char guid[256] = { 0 };
@@ -58,7 +58,6 @@ std::string GetSystemMachineGuid() {
     return CleanString(std::string(guid));
 }
 
-// 2. Windows Computer Name (e.g. WIN-CC37CF3B)
 std::string GetSystemComputerName() {
     char name[MAX_COMPUTERNAME_LENGTH + 1] = { 0 };
     DWORD size = sizeof(name);
@@ -123,7 +122,6 @@ bool ValidateActiveLease() {
     std::string localGuid = GetSystemMachineGuid();
     std::string localHost = GetSystemComputerName();
 
-    // Verify against both identifiers (matches either MachineGuid or ComputerName)
     bool hwidMatches = false;
     if (!leaseHwid.empty()) {
         if (!localGuid.empty() && leaseHwid == localGuid) hwidMatches = true;
@@ -169,10 +167,40 @@ HANDLE WINAPI HookedCreateFileW(
 
     if (hFile != INVALID_HANDLE_VALUE && lpFileName != NULL) {
         std::wstring ws(lpFileName);
-        if (ws.find(L"\\mod\\") != std::wstring::npos && ws.find(L".scs") != std::wstring::npos) {
-            EnterCriticalSection(&g_HandleLock);
-            g_ProtectedHandles[hFile] = true;
-            LeaveCriticalSection(&g_HandleLock);
+        std::transform(ws.begin(), ws.end(), ws.begin(), ::towlower);
+
+        // Check if file is in mod directory and has .scs extension
+        if ((ws.find(L"\\mod\\") != std::wstring::npos || ws.find(L"/mod/") != std::wstring::npos) &&
+            ws.find(L".scs") != std::wstring::npos) {
+
+            // Pre-screen: check if file is a ConvoyGate encrypted archive
+            LARGE_INTEGER zero = { 0 };
+            LARGE_INTEGER origPos = { 0 };
+            SetFilePointerEx(hFile, zero, &origPos, FILE_CURRENT);
+
+            SetFilePointerEx(hFile, zero, NULL, FILE_BEGIN);
+            unsigned char magic[4] = { 0 };
+            DWORD bytesRead = 0;
+            g_OriginalReadFile(hFile, magic, 4, &bytesRead, NULL);
+            SetFilePointerEx(hFile, origPos, NULL, FILE_BEGIN);
+
+            if (bytesRead == 4) {
+                // Decrypt magic with DRM_CIPHER_KEY
+                unsigned char decryptedMagic[4];
+                for (int i = 0; i < 4; i++) {
+                    decryptedMagic[i] = magic[i] ^ DRM_CIPHER_KEY[i] ^ (i & 0xFF);
+                }
+
+                // If decrypted magic matches PK\x03\x04 or SCS#, mark as protected
+                bool isZip = (decryptedMagic[0] == 'P' && decryptedMagic[1] == 'K' && decryptedMagic[2] == 0x03 && decryptedMagic[3] == 0x04);
+                bool isScs = (decryptedMagic[0] == 'S' && decryptedMagic[1] == 'C' && decryptedMagic[2] == 'S' && decryptedMagic[3] == '#');
+
+                if (isZip || isScs) {
+                    EnterCriticalSection(&g_HandleLock);
+                    g_ProtectedHandles[hFile] = true;
+                    LeaveCriticalSection(&g_HandleLock);
+                }
+            }
         }
     }
     return hFile;
@@ -185,11 +213,9 @@ BOOL WINAPI HookedReadFile(
     LPDWORD lpNumberOfBytesRead,
     LPOVERLAPPED lpOverlapped
 ) {
-    LARGE_INTEGER offsetBefore;
-    offsetBefore.QuadPart = 0;
+    LARGE_INTEGER offsetBefore = { 0 };
     if (lpOverlapped == NULL) {
-        LARGE_INTEGER zero;
-        zero.QuadPart = 0;
+        LARGE_INTEGER zero = { 0 };
         SetFilePointerEx(hFile, zero, &offsetBefore, FILE_CURRENT);
     } else {
         offsetBefore.LowPart = lpOverlapped->Offset;

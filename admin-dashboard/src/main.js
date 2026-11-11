@@ -14,7 +14,7 @@ const SERVER_URL = "https://api.convoygate.com";
 const ADMIN_SESSION_FILE = path.join(app.getPath("userData"), "admin_session.json");
 let adminSessionToken = null;
 
-// DRM Cipher Master Key
+// DRM Cipher Master Key matching C++ DLL
 const DRM_CIPHER_KEY = Buffer.from([
   0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61,
   0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
@@ -24,6 +24,8 @@ const MEGAPACKS_DIR = path.join(app.getPath("userData"), "megapacks_storage");
 const REGISTRY_FILE = path.join(app.getPath("userData"), "megapacks_registry.json");
 
 if (!fs.existsSync(MEGAPACKS_DIR)) fs.mkdirSync(MEGAPACKS_DIR, { recursive: true });
+
+const yieldEventLoop = () => new Promise(resolve => setImmediate(resolve));
 
 function loadRegistry() {
   try {
@@ -128,131 +130,6 @@ ipcMain.handle("discord-admin-login", async () => {
   });
 });
 
-function encryptPayload(buffer) {
-  for (let i = 0; i < buffer.length; i++) {
-    buffer[i] ^= DRM_CIPHER_KEY[i % DRM_CIPHER_KEY.length] ^ (i & 0xFF);
-  }
-}
-
-// Scrambles both standard SCS archives and SCS HashFS pre-compiled containers
-function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
-  const headerFd = fs.openSync(inputPath, "r");
-  const magicBuf = Buffer.alloc(8);
-  fs.readSync(headerFd, magicBuf, 0, 8, 0);
-  fs.closeSync(headerFd);
-
-  if (magicBuf.subarray(0, 6).toString("hex") === "377abcaf271c") {
-    throw new Error("This file is a 7-Zip (.7z) archive renamed to .scs. Extract it with 7-Zip and use 'Browse Folder' to publish.");
-  }
-  if (magicBuf.subarray(0, 4).toString("ascii") === "Rar!") {
-    throw new Error("This file is a WinRAR (.rar) archive renamed to .scs. Extract it and use 'Browse Folder' to publish.");
-  }
-
-  // Scramble SCS HashFS binary header & index block so it cannot be loaded without DLL
-  if (magicBuf.subarray(0, 4).toString("ascii") === "SCS#") {
-    if (onProgress) onProgress("Locking SCS HashFS binary container...", 50);
-    fs.copyFileSync(inputPath, outputPath);
-
-    const fd = fs.openSync(outputPath, "r+");
-    const stat = fs.fstatSync(fd);
-
-    const scrambleSize = Math.min(stat.size, 64 * 1024);
-    const buf = Buffer.alloc(scrambleSize);
-    fs.readSync(fd, buf, 0, scrambleSize, 0);
-    encryptPayload(buf);
-    fs.writeSync(fd, buf, 0, scrambleSize, 0);
-    fs.closeSync(fd);
-    return;
-  }
-
-  // Standard ZIP/SCS Processing
-  fs.copyFileSync(inputPath, outputPath);
-
-  const fd = fs.openSync(outputPath, "r+");
-  const stat = fs.fstatSync(fd);
-  const fileSize = stat.size;
-
-  const searchLen = Math.min(fileSize, 2 * 1024 * 1024);
-  const searchBuf = Buffer.alloc(searchLen);
-  fs.readSync(fd, searchBuf, 0, searchLen, fileSize - searchLen);
-
-  let eocdOffsetInBuf = -1;
-  for (let i = searchLen - 22; i >= 0; i--) {
-    if (searchBuf.readUInt32LE(i) === 0x06054b50) {
-      eocdOffsetInBuf = i;
-      break;
-    }
-  }
-
-  if (eocdOffsetInBuf === -1) {
-    fs.closeSync(fd);
-    throw new Error("Invalid archive: missing ZIP directory (EOCD). The file may be an incomplete download.");
-  }
-
-  const cdSize = searchBuf.readUInt32LE(eocdOffsetInBuf + 12);
-  const cdOffset = searchBuf.readUInt32LE(eocdOffsetInBuf + 16);
-
-  if (cdOffset + cdSize > fileSize) {
-    fs.closeSync(fd);
-    throw new Error("Archive central directory exceeds file size. The file may be corrupted.");
-  }
-
-  const cdBuf = Buffer.alloc(cdSize);
-  fs.readSync(fd, cdBuf, 0, cdSize, cdOffset);
-
-  let pos = 0;
-  let fileCount = 0;
-
-  while (pos < cdSize) {
-    if (cdBuf.readUInt32LE(pos) !== 0x02014b50) break;
-
-    const nameLen = cdBuf.readUInt16LE(pos + 28);
-    const extraLen = cdBuf.readUInt16LE(pos + 30);
-    const commentLen = cdBuf.readUInt16LE(pos + 32);
-    const lfhOffset = cdBuf.readUInt32LE(pos + 42);
-
-    const nameBuf = Buffer.alloc(nameLen);
-    fs.readSync(fd, nameBuf, 0, nameLen, cdOffset + pos + 46);
-    const fileName = nameBuf.toString("utf8");
-
-    const isMetadata = fileName.toLowerCase().includes("manifest.sii") ||
-                       fileName.toLowerCase().includes("mod_icon.jpg") ||
-                       fileName.toLowerCase().includes("description.txt");
-
-    cdBuf.writeUInt16LE(99, pos + 6);
-    const flags = cdBuf.readUInt16LE(pos + 8);
-    cdBuf.writeUInt16LE(flags | 0x0001, pos + 8);
-
-    const lfhHeader = Buffer.alloc(30);
-    fs.readSync(fd, lfhHeader, 0, 30, lfhOffset);
-
-    if (lfhHeader.readUInt32LE(0) === 0x04034b50) {
-      const lfhNameLen = lfhHeader.readUInt16LE(26);
-      const lfhExtraLen = lfhHeader.readUInt16LE(28);
-      const compressedSize = lfhHeader.readUInt32LE(18);
-      const dataOffset = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
-
-      if (!isMetadata && compressedSize > 0) {
-        const payloadBuf = Buffer.alloc(compressedSize);
-        fs.readSync(fd, payloadBuf, 0, compressedSize, dataOffset);
-        encryptPayload(payloadBuf);
-        fs.writeSync(fd, payloadBuf, 0, compressedSize, dataOffset);
-      }
-
-      lfhHeader.writeUInt16LE(99, 4);
-      lfhHeader.writeUInt16LE(flags | 0x0001, 6);
-      fs.writeSync(fd, lfhHeader, 0, 30, lfhOffset);
-    }
-
-    pos += 46 + nameLen + extraLen + commentLen;
-    fileCount++;
-    if (onProgress && fileCount % 100 === 0) onProgress(`Secured ${fileCount} assets...`, 30);
-  }
-
-  fs.writeSync(fd, cdBuf, 0, cdSize, cdOffset);
-  fs.closeSync(fd);
-}
-
 function getAllFiles(dir, base = "") {
   let results = [];
   if (!fs.existsSync(dir)) return results;
@@ -269,21 +146,23 @@ function getAllFiles(dir, base = "") {
   return results;
 }
 
-function copyFolderRecursive(source, target) {
+async function copyFolderRecursive(source, target) {
   if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
   const items = fs.readdirSync(source, { withFileTypes: true });
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     const srcPath = path.join(source, item.name);
     const dstPath = path.join(target, item.name);
     if (item.isDirectory()) {
-      copyFolderRecursive(srcPath, dstPath);
+      await copyFolderRecursive(srcPath, dstPath);
     } else {
       fs.copyFileSync(srcPath, dstPath);
     }
+    if (i % 50 === 0) await yieldEventLoop();
   }
 }
 
-function extractArchiveToDir(archivePath, targetDir) {
+async function extractArchiveToDir(archivePath, targetDir, onProgress) {
   if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
 
   const fd = fs.openSync(archivePath, "r");
@@ -315,6 +194,8 @@ function extractArchiveToDir(archivePath, targetDir) {
     fs.readSync(fd, cdBuf, 0, cdSize, cdOffset);
 
     let pos = 0;
+    let extractedCount = 0;
+
     while (pos < cdSize) {
       if (cdBuf.readUInt32LE(pos) !== 0x02014b50) break;
 
@@ -360,13 +241,20 @@ function extractArchiveToDir(archivePath, targetDir) {
       const destSubDir = path.dirname(destPath);
       if (!fs.existsSync(destSubDir)) fs.mkdirSync(destSubDir, { recursive: true });
       fs.writeFileSync(destPath, decompressed);
+
+      extractedCount++;
+      if (extractedCount % 25 === 0) {
+        if (onProgress) onProgress(extractedCount);
+        await yieldEventLoop();
+      }
     }
   } finally {
     fs.closeSync(fd);
   }
 }
 
-function packFolderEncrypted(sourceFolder, outputPath, onProgress) {
+// Assemble clean SCS ZIP archives before on-the-fly stream encryption
+async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
   const files = getAllFiles(sourceFolder);
   if (files.length === 0) throw new Error("Folder contains no mod assets.");
 
@@ -376,27 +264,18 @@ function packFolderEncrypted(sourceFolder, outputPath, onProgress) {
 
   for (let i = 0; i < files.length; i++) {
     const item = files[i];
-    let fileBuf = fs.readFileSync(item.full);
+    const fileBuf = fs.readFileSync(item.full);
     const nameBuf = Buffer.from(item.rel, "utf8");
-    const isMetadata = item.rel.toLowerCase().includes("manifest.sii") ||
-                       item.rel.toLowerCase().includes("mod_icon.jpg") ||
-                       item.rel.toLowerCase().includes("description.txt");
-
-    if (!isMetadata) {
-      encryptPayload(fileBuf);
-    }
-
     const size = fileBuf.length;
-    if (onProgress && i % 100 === 0) onProgress(`Secured: ${i + 1}/${files.length} files...`, Math.round((i / files.length) * 40));
 
     const lfh = Buffer.alloc(30);
     lfh.writeUInt32LE(0x04034b50, 0);
-    lfh.writeUInt16LE(99, 4);
-    lfh.writeUInt16LE(0x0001, 6);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(0, 6);
     lfh.writeUInt16LE(0, 8);
     lfh.writeUInt16LE(0, 10);
     lfh.writeUInt16LE(0, 12);
-    lfh.writeUInt32LE(0xDEADBEEF, 14);
+    lfh.writeUInt32LE(0x00000000, 14);
     lfh.writeUInt32LE(size, 18);
     lfh.writeUInt32LE(size, 22);
     lfh.writeUInt16LE(nameBuf.length, 26);
@@ -414,12 +293,12 @@ function packFolderEncrypted(sourceFolder, outputPath, onProgress) {
     const cd = Buffer.alloc(46);
     cd.writeUInt32LE(0x02014b50, 0);
     cd.writeUInt16LE(0x0314, 4);
-    cd.writeUInt16LE(99, 6);
-    cd.writeUInt16LE(0x0001, 8);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt16LE(0, 8);
     cd.writeUInt16LE(0, 10);
     cd.writeUInt16LE(0, 12);
     cd.writeUInt16LE(0, 14);
-    cd.writeUInt32LE(0xDEADBEEF, 16);
+    cd.writeUInt32LE(0x00000000, 16);
     cd.writeUInt32LE(size, 20);
     cd.writeUInt32LE(size, 24);
     cd.writeUInt16LE(nameBuf.length, 28);
@@ -431,14 +310,22 @@ function packFolderEncrypted(sourceFolder, outputPath, onProgress) {
     cd.writeUInt32LE(localHeaderOffset, 42);
 
     centralEntries.push({ cd, nameBuf });
+
+    if (i % 25 === 0) {
+      if (onProgress) onProgress(`Archiving: ${i + 1}/${files.length} assets...`, Math.round((i / files.length) * 40));
+      await yieldEventLoop();
+    }
   }
 
   const cdStartOffset = currentOffset;
-  for (const entry of centralEntries) {
+  for (let j = 0; j < centralEntries.length; j++) {
+    const entry = centralEntries[j];
     fs.writeSync(outFd, entry.cd, 0, entry.cd.length, currentOffset);
     currentOffset += entry.cd.length;
     fs.writeSync(outFd, entry.nameBuf, 0, entry.nameBuf.length, currentOffset);
     currentOffset += entry.nameBuf.length;
+
+    if (j % 50 === 0) await yieldEventLoop();
   }
   const cdSize = currentOffset - cdStartOffset;
 
@@ -456,7 +343,8 @@ function packFolderEncrypted(sourceFolder, outputPath, onProgress) {
   fs.closeSync(outFd);
 }
 
-function streamUploadToBackend(filePath, headers, onProgress) {
+// Full-file absolute-offset stream encryption matching convoygate.dll
+function streamEncryptedUploadToBackend(filePath, headers, onProgress) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${SERVER_URL}/api/v1/admin/upload-stream`);
     const stat = fs.statSync(filePath);
@@ -524,15 +412,19 @@ function streamUploadToBackend(filePath, headers, onProgress) {
     });
 
     let bytesSent = 0;
-    const progressTransform = new Transform({
+    const encryptTransform = new Transform({
       transform(chunk, encoding, callback) {
+        for (let i = 0; i < chunk.length; i++) {
+          const absPos = bytesSent + i;
+          chunk[i] ^= DRM_CIPHER_KEY[absPos % 16] ^ (absPos & 0xFF);
+        }
         bytesSent += chunk.length;
         if (onProgress) onProgress(bytesSent, stat.size);
         callback(null, chunk);
       },
     });
 
-    pipeline(fileStream, progressTransform, req).catch((err) => {
+    pipeline(fileStream, encryptTransform, req).catch((err) => {
       cleanup();
       if (!settled) {
         settled = true;
@@ -549,7 +441,7 @@ function updateMegaPackManifest(targetDir, megaPackName, version, includedFiles)
   const fileListText = includedFiles.map(f => `- ${f}`).join("\n");
   const descContent = `Mega Pack: ${megaPackName}\n` +
     `Version: ${version}\n` +
-    `Protected by ConvoyGate DRM\n\n` +
+    `Protected by ConvoyGate Fleet Engine\n\n` +
     `Included Packages:\n${fileListText}\n`;
 
   fs.writeFileSync(descPath, descContent, "utf8");
@@ -623,23 +515,20 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
       const modName = payload.name;
       const stat = fs.statSync(filePath);
 
-      tmpFinalScs = path.join(os.tmpdir(), `${modId}_${uniqueSuffix}_locked.scs`);
+      let fileToUpload = filePath;
 
-      if (stat.isFile()) {
-        sendStatus("Auditing format & packaging assets...", 0);
-        encryptAndLockScsArchive(filePath, tmpFinalScs, (msg, pct) => {
+      if (stat.isDirectory()) {
+        tmpFinalScs = path.join(os.tmpdir(), `${modId}_${uniqueSuffix}.scs`);
+        sendStatus("Compiling folder into SCS archive...", 10);
+        await packFolderToSCS(filePath, tmpFinalScs, (msg, pct) => {
           sendStatus(msg, pct !== undefined ? pct : 30);
         });
-      } else {
-        sendStatus("Compiling folder into encrypted SCS archive...", 0);
-        packFolderEncrypted(filePath, tmpFinalScs, (msg, pct) => {
-          sendStatus(msg, pct !== undefined ? pct : 30);
-        });
+        fileToUpload = tmpFinalScs;
       }
 
-      sendStatus("Streaming package to Sydney VPS...", 40);
-      const result = await streamUploadToBackend(
-        tmpFinalScs,
+      sendStatus("Encrypting stream & uploading to Sydney VPS...", 40);
+      const result = await streamEncryptedUploadToBackend(
+        fileToUpload,
         {
           "x-mod-id": encodeURIComponent(modId),
           "x-mod-name": encodeURIComponent(modName),
@@ -648,7 +537,7 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         },
         (sent, total) => {
           const pct = Math.round((sent / total) * 100);
-          sendStatus(`Uploading: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
+          sendStatus(`Encrypting & Uploading: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
         }
       );
 
@@ -678,13 +567,13 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
       for (let i = 0; i < filePaths.length; i++) {
         const itemPath = filePaths[i];
         const baseName = path.basename(itemPath);
-        sendStatus(`Staging [${i + 1}/${filePaths.length}]: ${baseName}...`, Math.round((i / filePaths.length) * 30));
+        sendStatus(`Staging [${i + 1}/${filePaths.length}]: ${baseName}...`, Math.round((i / filePaths.length) * 20));
 
         const targetSource = path.join(sourcesDir, baseName);
         const stat = fs.statSync(itemPath);
 
         if (stat.isDirectory()) {
-          copyFolderRecursive(itemPath, targetSource);
+          await copyFolderRecursive(itemPath, targetSource);
         } else {
           fs.copyFileSync(itemPath, targetSource);
         }
@@ -692,6 +581,7 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         if (!packEntry.files.includes(baseName)) {
           packEntry.files.push(baseName);
         }
+        await yieldEventLoop();
       }
 
       saveRegistry(registry);
@@ -704,26 +594,28 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         const srcPath = path.join(sourcesDir, fileName);
         if (!fs.existsSync(srcPath)) continue;
 
-        sendStatus(`Extracting: ${fileName}...`, 30 + Math.round((i / packEntry.files.length) * 30));
+        sendStatus(`Merging truck assets: ${fileName}...`, 20 + Math.round((i / packEntry.files.length) * 25));
         const stat = fs.statSync(srcPath);
         if (stat.isDirectory()) {
-          copyFolderRecursive(srcPath, assembledDir);
+          await copyFolderRecursive(srcPath, assembledDir);
         } else {
-          extractArchiveToDir(srcPath, assembledDir);
+          await extractArchiveToDir(srcPath, assembledDir);
         }
+        await yieldEventLoop();
       }
 
-      sendStatus("Generating master ATS Mega Pack manifest...", 65);
+      sendStatus("Generating master Mega Pack dealer manifest...", 50);
       updateMegaPackManifest(assembledDir, megaPackName, version, packEntry.files);
+      await yieldEventLoop();
 
-      tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_${uniqueSuffix}_megapack_locked.scs`);
-      sendStatus("Encrypting combined Mega Pack assets...", 70);
-      packFolderEncrypted(assembledDir, tmpFinalScs, (msg, pct) => {
-        sendStatus(msg, pct);
+      tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_${uniqueSuffix}_megapack.scs`);
+      sendStatus("Compiling merged Mega Pack container...", 55);
+      await packFolderToSCS(assembledDir, tmpFinalScs, (msg, pct) => {
+        sendStatus(msg, 55 + Math.round((pct / 100) * 25));
       });
 
-      sendStatus("Streaming Mega Pack to Sydney VPS...", 85);
-      const result = await streamUploadToBackend(
+      sendStatus("Encrypting stream & uploading Mega Pack to Sydney VPS...", 80);
+      const result = await streamEncryptedUploadToBackend(
         tmpFinalScs,
         {
           "x-mod-id": encodeURIComponent(megaPackId),
@@ -733,7 +625,7 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         },
         (sent, total) => {
           const pct = Math.round((sent / total) * 100);
-          sendStatus(`Uploading Mega Pack: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
+          sendStatus(`Encrypting & Uploading Mega Pack: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
         }
       );
 
@@ -796,23 +688,25 @@ ipcMain.handle("remove-megapack-item", async (event, { megaPackId, fileName }) =
 
       const stat = fs.statSync(srcPath);
       if (stat.isDirectory()) {
-        copyFolderRecursive(srcPath, assembledDir);
+        await copyFolderRecursive(srcPath, assembledDir);
       } else {
-        extractArchiveToDir(srcPath, assembledDir);
+        await extractArchiveToDir(srcPath, assembledDir);
       }
+      await yieldEventLoop();
     }
 
     sendStatus("Regenerating manifest...", 50);
     updateMegaPackManifest(assembledDir, packEntry.name, packEntry.version || "1.0.0", packEntry.files);
+    await yieldEventLoop();
 
     const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-    tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_${uniqueSuffix}_megapack_locked.scs`);
+    tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_${uniqueSuffix}_megapack.scs`);
 
-    sendStatus("Encrypting updated Mega Pack...", 65);
-    packFolderEncrypted(assembledDir, tmpFinalScs);
+    sendStatus("Packaging updated Mega Pack...", 65);
+    await packFolderToSCS(assembledDir, tmpFinalScs);
 
-    sendStatus("Syncing updated Mega Pack to Sydney VPS...", 85);
-    const result = await streamUploadToBackend(
+    sendStatus("Encrypting & syncing updated Mega Pack to Sydney VPS...", 85);
+    const result = await streamEncryptedUploadToBackend(
       tmpFinalScs,
       {
         "x-mod-id": encodeURIComponent(megaPackId),
