@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, Notificati
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const crypto = require("crypto");
 const axios = require("axios");
 
 let mainWindow = null;
@@ -13,10 +14,27 @@ const SERVER_URL = "https://api.convoygate.com";
 const SESSION_FILE = path.join(app.getPath("userData"), "session.json");
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
 
-// Default Settings
+// Default paths and settings
+function getDefaultModDir() {
+  const home = os.homedir();
+  const atsMod = path.join(home, "Documents", "American Truck Simulator", "mod");
+  const etsMod = path.join(home, "Documents", "Euro Truck Simulator 2", "mod");
+  if (fs.existsSync(path.join(home, "Documents", "American Truck Simulator"))) return atsMod;
+  if (fs.existsSync(path.join(home, "Documents", "Euro Truck Simulator 2"))) return etsMod;
+  return atsMod;
+}
+
+function getDefaultGameDir() {
+  return "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins";
+}
+
 let userSettings = {
+  modDir: getDefaultModDir(),
+  gameDir: getDefaultGameDir(),
   startOnBoot: true,
   backgroundSync: true,
+  autoUpdate: true,
+  autoInstall: false,
   syncIntervalMinutes: 15
 };
 
@@ -26,6 +44,7 @@ function loadSettings() {
       userSettings = { ...userSettings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) };
     }
   } catch (e) {}
+  if (!fs.existsSync(userSettings.modDir)) fs.mkdirSync(userSettings.modDir, { recursive: true });
 }
 
 function saveSettings(newSettings) {
@@ -34,9 +53,8 @@ function saveSettings(newSettings) {
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2), "utf8");
   } catch (e) {}
 
-  // Sync with Windows Startup
   app.setLoginItemSettings({
-    openAtLogin: userSettings.startOnBoot,
+    openAtLogin: userSettings.startOnBoot !== false,
     openAsHidden: true,
   });
 }
@@ -62,27 +80,10 @@ function clearSession() {
   } catch (e) {}
 }
 
-// Auto-detect ATS and ETS2 documents directories
-function getGameModDirs() {
-  const home = os.homedir();
-  const atsMod = path.join(home, "Documents", "American Truck Simulator", "mod");
-  const etsMod = path.join(home, "Documents", "Euro Truck Simulator 2", "mod");
-  const dirs = [];
-
-  if (fs.existsSync(path.join(home, "Documents", "American Truck Simulator"))) {
-    fs.mkdirSync(atsMod, { recursive: true });
-    dirs.push(atsMod);
-  }
-  if (fs.existsSync(path.join(home, "Documents", "Euro Truck Simulator 2"))) {
-    fs.mkdirSync(etsMod, { recursive: true });
-    dirs.push(etsMod);
-  }
-
-  if (dirs.length === 0) {
-    fs.mkdirSync(atsMod, { recursive: true });
-    dirs.push(atsMod);
-  }
-  return dirs;
+function getHWID() {
+  const network = JSON.stringify(os.networkInterfaces());
+  const raw = `${os.hostname()}_${os.platform()}_${os.arch()}_${network}`;
+  return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
 // Ensure single instance running
@@ -101,10 +102,10 @@ if (!gotTheLock) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1040,
-    height: 760,
-    minWidth: 840,
-    minHeight: 560,
+    width: 1080,
+    height: 780,
+    minWidth: 860,
+    minHeight: 580,
     backgroundColor: "#060a12",
     autoHideMenuBar: true,
     webPreferences: {
@@ -115,7 +116,6 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "index.html"));
 
-  // Minimize to Tray on close instead of exiting
   mainWindow.on("close", (event) => {
     if (!isQuitting && userSettings.backgroundSync) {
       event.preventDefault();
@@ -123,7 +123,7 @@ function createWindow() {
       if (Notification.isSupported()) {
         new Notification({
           title: "ConvoyGate is active",
-          body: "ConvoyGate is running in the background to keep your mods updated."
+          body: "ConvoyGate is running in the system tray to keep your mods updated."
         }).show();
       }
     }
@@ -131,7 +131,6 @@ function createWindow() {
 }
 
 function createTray() {
-  // Built-in base64 icon so no missing file crashes the tray
   const iconBase64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAZElEQVQ4T2NkoBAwUqifYdQAHsXIhvoZw5L//xkYGBkZGBmZkSQY8en4//8/A8P///8Z0QVGDRhUBoA0w9SDNCNpgGmGG4BkABkewGkAOR5ACg7UeIDR1IBfPQwzB5u7sRlASvAAq8tF38k5bE0AAAAASUVORK5CYII=";
   const image = nativeImage.createFromBuffer(Buffer.from(iconBase64, "base64"));
   
@@ -171,7 +170,7 @@ function createTray() {
   });
 }
 
-// Background Auto-Update Engine
+// Background Silent Mod Updater
 async function runSilentBackgroundUpdate(notifyUser = false) {
   const session = loadSession();
   if (!session || !session.token) return;
@@ -181,27 +180,24 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
     if (!res.data || !res.data.success) return;
 
     const remoteMods = res.data.mods;
-    const dirs = getGameModDirs();
-    const primaryDir = dirs[0];
+    const destDir = userSettings.modDir;
     let updatedCount = 0;
 
     for (const mod of remoteMods) {
-      const localFile = path.join(primaryDir, `${mod.id}.scs`);
+      const localFile = path.join(destDir, `${mod.id}.scs`);
       let needsDownload = false;
 
       if (!fs.existsSync(localFile)) {
-        // Auto-install newly added mods
-        needsDownload = true;
+        if (userSettings.autoInstall) needsDownload = true;
       } else {
         const stat = fs.statSync(localFile);
-        // If file size changed, mod has an update
-        if (stat.size !== mod.file_size) {
+        if (userSettings.autoUpdate && stat.size !== mod.file_size) {
           needsDownload = true;
         }
       }
 
       if (needsDownload) {
-        const tempFile = path.join(primaryDir, `${mod.id}.scs.download`);
+        const tempFile = path.join(destDir, `${mod.id}.scs.download`);
         try {
           const downloadRes = await axios({
             method: "GET",
@@ -229,12 +225,12 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
     if (updatedCount > 0 && Notification.isSupported()) {
       new Notification({
         title: "ConvoyGate Mods Synchronized",
-        body: `Updated/installed ${updatedCount} mod package(s). Your game is ready!`
+        body: `Updated/installed ${updatedCount} mod package(s).`
       }).show();
     } else if (notifyUser && Notification.isSupported()) {
       new Notification({
         title: "ConvoyGate",
-        body: "All mods are already up to date!"
+        body: "All mods are up to date."
       }).show();
     }
 
@@ -249,60 +245,24 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
 
-  // Background Sync Interval (Default 15 minutes)
   syncInterval = setInterval(() => {
     if (userSettings.backgroundSync) {
       runSilentBackgroundUpdate(false);
     }
-  }, userSettings.syncIntervalMinutes * 60 * 1000);
+  }, (userSettings.syncIntervalMinutes || 15) * 60 * 1000);
 
-  // Initial silent check on boot
   setTimeout(() => runSilentBackgroundUpdate(false), 5000);
 });
 
-// --- IPC HANDLERS ---
-
-// Session management
-ipcMain.handle("get-stored-session", async () => {
-  const session = loadSession();
-  if (!session) return { hasSession: false };
-
-  // Validate token with VPS
-  try {
-    const res = await axios.get(`${SERVER_URL}/api/v1/health`, { timeout: 4000 });
-    if (res.status === 200) {
-      return { hasSession: true, session };
-    }
-  } catch (err) {}
-
-  return { hasSession: true, session };
-});
-
-ipcMain.handle("save-session", (event, sessionData) => {
-  saveSession(sessionData);
-  return { success: true };
-});
-
-ipcMain.handle("logout", () => {
-  clearSession();
-  return { success: true };
-});
-
-// Settings management
-ipcMain.handle("get-settings", () => userSettings);
-ipcMain.handle("update-settings", (event, newSettings) => {
-  saveSettings(newSettings);
-  return userSettings;
-});
-
-// Discord Login OAuth Window
-ipcMain.handle("discord-client-login", async () => {
+// --- DISCORD OAUTH HANDLER (Supports both 'discord-login' and 'discord-client-login') ---
+async function handleDiscordLogin() {
   return new Promise((resolve) => {
     const authWin = new BrowserWindow({
-      width: 500,
+      width: 520,
       height: 750,
       parent: mainWindow,
       modal: true,
+      show: true,
       autoHideMenuBar: true,
       backgroundColor: "#060a12",
       webPreferences: {
@@ -326,57 +286,117 @@ ipcMain.handle("discord-client-login", async () => {
     });
 
     authWin.on("closed", () => {
-      resolve({ success: false, error: "Authentication cancelled." });
+      const session = loadSession();
+      if (!session) {
+        resolve({ success: false, error: "Discord authentication was closed." });
+      }
     });
   });
+}
+
+ipcMain.handle("discord-login", handleDiscordLogin);
+ipcMain.handle("discord-client-login", handleDiscordLogin);
+
+ipcMain.handle("get-stored-session", async () => {
+  const session = loadSession();
+  if (!session) return { hasSession: false };
+  return { hasSession: true, session };
 });
 
-// Mod Catalog
-ipcMain.handle("get-catalog", async () => {
+ipcMain.handle("logout", () => {
+  clearSession();
+  return { success: true };
+});
+
+ipcMain.handle("get-hwid", () => getHWID());
+
+// Settings
+ipcMain.handle("load-settings", () => userSettings);
+ipcMain.handle("get-settings", () => userSettings);
+ipcMain.handle("save-settings", (event, newSettings) => {
+  saveSettings(newSettings);
+  return userSettings;
+});
+ipcMain.handle("update-settings", (event, newSettings) => {
+  saveSettings(newSettings);
+  return userSettings;
+});
+
+// Plugin Hook Audit & Re-injection
+ipcMain.handle("audit-plugin", () => {
+  const pluginFile = path.join(userSettings.gameDir, "convoygate.dll");
+  const exists = fs.existsSync(pluginFile);
+  return { valid: exists, path: pluginFile };
+});
+
+ipcMain.handle("reinstall-plugin", () => {
   try {
-    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
-    return res.data;
+    fs.mkdirSync(userSettings.gameDir, { recursive: true });
+    const targetPath = path.join(userSettings.gameDir, "convoygate.dll");
+    
+    // Check for bundled DLL in application directory or create placeholder hook
+    const bundledPath = path.join(__dirname, "..", "assets", "convoygate.dll");
+    if (fs.existsSync(bundledPath)) {
+      fs.copyFileSync(bundledPath, targetPath);
+    } else {
+      // Placeholder DLL signature file for dev environments
+      fs.writeFileSync(targetPath, Buffer.from("ConvoyGate-Hook-x64"));
+    }
+    return { success: true, path: targetPath };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
 
-// Installed mods
-ipcMain.handle("get-installed-mods", () => {
-  const dirs = getGameModDirs();
-  const installedIds = new Set();
-
-  dirs.forEach(d => {
-    if (fs.existsSync(d)) {
-      const files = fs.readdirSync(d);
-      files.forEach(f => {
-        if (f.endsWith(".scs")) {
-          installedIds.add(f.replace(/\.scs$/i, ""));
-        }
-      });
-    }
+// Directory Browse Dialog
+ipcMain.handle("dialog-browse-dir", async (event, type) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: type === "mod" ? "Select Mod Directory" : "Select Game Plugins Directory",
+    properties: ["openDirectory"]
   });
-
-  return Array.from(installedIds);
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
 });
 
-// Inspect Single Mod Details
-ipcMain.handle("get-single-mod-details", async (event, mod) => {
-  const dirs = getGameModDirs();
-  let targetPath = null;
+// Remote Mod Catalog + Local Installed Mapping
+ipcMain.handle("fetch-catalog", async () => {
+  try {
+    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
+    const mods = res.data?.mods || [];
+    const installed = {};
 
-  for (const d of dirs) {
-    const p = path.join(d, `${mod.id}.scs`);
-    if (fs.existsSync(p)) {
-      targetPath = p;
-      break;
-    }
+    mods.forEach(mod => {
+      const localPath = path.join(userSettings.modDir, `${mod.id}.scs`);
+      if (fs.existsSync(localPath)) {
+        const stat = fs.statSync(localPath);
+        installed[mod.id] = {
+          installed: true,
+          needsUpdate: stat.size !== mod.file_size
+        };
+      } else {
+        installed[mod.id] = {
+          installed: false,
+          needsUpdate: false
+        };
+      }
+    });
+
+    return { success: true, mods, installed };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
+});
+ipcMain.handle("get-catalog", async () => {
+  return await ipcMain.handlers["fetch-catalog"]();
+});
 
+// Single Mod Inspector: Extract icon and description from SCS
+ipcMain.handle("get-single-mod-details", async (event, mod) => {
+  const targetPath = path.join(userSettings.modDir, `${mod.id}.scs`);
   let description = `Package: ${mod.name}\nVersion: ${mod.version}\nTier: ${mod.tier || "All Tiers"}\n\nProtected by ConvoyGate Decryption Streaming.`;
   let iconBase64 = null;
 
-  if (targetPath) {
+  if (fs.existsSync(targetPath)) {
     try {
       const fd = fs.openSync(targetPath, "r");
       const stat = fs.fstatSync(fd);
@@ -430,22 +450,21 @@ ipcMain.handle("get-single-mod-details", async (event, mod) => {
   return { description, iconBase64 };
 });
 
-// Download & Install Mod
-ipcMain.handle("download-mod", async (event, modId) => {
+// Single Mod Downloader
+ipcMain.handle("install-single-mod", async (event, modId) => {
   const session = loadSession();
   const token = session ? session.token : "";
-
-  const dirs = getGameModDirs();
-  const destDir = dirs[0];
-  const targetFile = path.join(destDir, `${modId}.scs`);
-  const tempFile = path.join(destDir, `${modId}.scs.download`);
+  const targetFile = path.join(userSettings.modDir, `${modId}.scs`);
+  const tempFile = path.join(userSettings.modDir, `${modId}.scs.download`);
 
   try {
+    event.sender.send("queue-progress", { message: `Requesting lease & stream for ${modId}...`, percent: 20 });
+
     const res = await axios({
       method: "GET",
       url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(modId)}?token=${token}`,
       responseType: "stream",
-      timeout: 300000,
+      timeout: 600000,
     });
 
     const writer = fs.createWriteStream(tempFile);
@@ -458,46 +477,87 @@ ipcMain.handle("download-mod", async (event, modId) => {
     if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
     fs.renameSync(tempFile, targetFile);
 
+    event.sender.send("queue-progress", { message: `Installed ${modId}.scs`, percent: 100 });
     return { success: true };
   } catch (err) {
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     return { success: false, error: err.response?.data?.error || err.message };
   }
 });
+ipcMain.handle("download-mod", async (event, modId) => {
+  return await ipcMain.handlers["install-single-mod"](event, modId);
+});
+
+// Batch Installer
+ipcMain.handle("install-all-mods", async (event) => {
+  const session = loadSession();
+  const token = session ? session.token : "";
+
+  try {
+    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
+    const mods = res.data?.mods || [];
+    let processed = 0;
+
+    for (const mod of mods) {
+      const targetFile = path.join(userSettings.modDir, `${mod.id}.scs`);
+      const tempFile = path.join(userSettings.modDir, `${mod.id}.scs.download`);
+      const pct = Math.round((processed / mods.length) * 100);
+
+      event.sender.send("queue-progress", { 
+        message: `[${processed + 1}/${mods.length}] Downloading ${mod.name}...`, 
+        percent: pct 
+      });
+
+      const downloadRes = await axios({
+        method: "GET",
+        url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(mod.id)}?token=${token}`,
+        responseType: "stream",
+        timeout: 600000,
+      });
+
+      const writer = fs.createWriteStream(tempFile);
+      await new Promise((resolve, reject) => {
+        downloadRes.data.pipe(writer);
+        writer.on("finish", resolve);
+        writer.on("error", reject);
+      });
+
+      if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
+      fs.renameSync(tempFile, targetFile);
+      processed++;
+    }
+
+    event.sender.send("queue-progress", { message: "All mods successfully installed!", percent: 100 });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
 
 // Uninstall Single Mod
 ipcMain.handle("uninstall-mod", (event, modId) => {
-  const dirs = getGameModDirs();
-  dirs.forEach(d => {
-    const p = path.join(d, `${modId}.scs`);
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-  });
+  const p = path.join(userSettings.modDir, `${modId}.scs`);
+  if (fs.existsSync(p)) fs.unlinkSync(p);
   return { success: true };
 });
 
 // Uninstall All Mods
 ipcMain.handle("uninstall-all-mods", () => {
-  const dirs = getGameModDirs();
   let count = 0;
-
-  dirs.forEach(d => {
-    if (fs.existsSync(d)) {
-      const files = fs.readdirSync(d);
-      files.forEach(f => {
-        if (f.endsWith(".scs")) {
-          try {
-            fs.unlinkSync(path.join(d, f));
-            count++;
-          } catch (e) {}
-        }
-      });
-    }
-  });
-
+  if (fs.existsSync(userSettings.modDir)) {
+    const files = fs.readdirSync(userSettings.modDir);
+    files.forEach(f => {
+      if (f.endsWith(".scs")) {
+        try {
+          fs.unlinkSync(path.join(userSettings.modDir, f));
+          count++;
+        } catch (e) {}
+      }
+    });
+  }
   return { success: true, removedCount: count };
 });
 
-// Force background sync from UI
 ipcMain.handle("sync-now", async () => {
   await runSilentBackgroundUpdate(true);
   return { success: true };

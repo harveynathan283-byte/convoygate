@@ -14,7 +14,7 @@ const SERVER_URL = "https://api.convoygate.com";
 const ADMIN_SESSION_FILE = path.join(app.getPath("userData"), "admin_session.json");
 let adminSessionToken = null;
 
-// Static DRM Master Key
+// DRM Cipher Master Key
 const DRM_CIPHER_KEY = Buffer.from([
   0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61,
   0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
@@ -135,14 +135,30 @@ function encryptPayload(buffer) {
   }
 }
 
+// Deep EOCD scanning with format pre-flight checks
 function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
+  const headerFd = fs.openSync(inputPath, "r");
+  const magicBuf = Buffer.alloc(8);
+  fs.readSync(headerFd, magicBuf, 0, 8, 0);
+  fs.closeSync(headerFd);
+
+  if (magicBuf.subarray(0, 4).toString("ascii") === "SCS#") {
+    throw new Error("This mod is already encrypted by its author using SCS HashFS. ConvoyGate can only process standard mods or folders.");
+  }
+  if (magicBuf.subarray(0, 6).toString("hex") === "377abcaf271c") {
+    throw new Error("This file is a 7-Zip (.7z) archive renamed to .scs. Extract it with 7-Zip and use 'Browse Folder' to publish.");
+  }
+  if (magicBuf.subarray(0, 4).toString("ascii") === "Rar!") {
+    throw new Error("This file is a WinRAR (.rar) archive renamed to .scs. Extract it and use 'Browse Folder' to publish.");
+  }
+
   fs.copyFileSync(inputPath, outputPath);
 
   const fd = fs.openSync(outputPath, "r+");
   const stat = fs.fstatSync(fd);
   const fileSize = stat.size;
 
-  const searchLen = Math.min(fileSize, 65557);
+  const searchLen = Math.min(fileSize, 2 * 1024 * 1024);
   const searchBuf = Buffer.alloc(searchLen);
   fs.readSync(fd, searchBuf, 0, searchLen, fileSize - searchLen);
 
@@ -156,11 +172,16 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
 
   if (eocdOffsetInBuf === -1) {
     fs.closeSync(fd);
-    throw new Error("Invalid archive: missing EOCD.");
+    throw new Error("Invalid archive: missing ZIP directory (EOCD). The file may be corrupted, a renamed RAR/7z, or an incomplete download.");
   }
 
   const cdSize = searchBuf.readUInt32LE(eocdOffsetInBuf + 12);
   const cdOffset = searchBuf.readUInt32LE(eocdOffsetInBuf + 16);
+
+  if (cdOffset + cdSize > fileSize) {
+    fs.closeSync(fd);
+    throw new Error("Archive central directory exceeds file size. The file may be incomplete or corrupted.");
+  }
 
   const cdBuf = Buffer.alloc(cdSize);
   fs.readSync(fd, cdBuf, 0, cdSize, cdOffset);
@@ -254,7 +275,7 @@ function extractArchiveToDir(archivePath, targetDir) {
   try {
     const stat = fs.fstatSync(fd);
     const fileSize = stat.size;
-    const searchLen = Math.min(fileSize, 65557);
+    const searchLen = Math.min(fileSize, 2 * 1024 * 1024);
     const searchBuf = Buffer.alloc(searchLen);
     fs.readSync(fd, searchBuf, 0, searchLen, fileSize - searchLen);
 
