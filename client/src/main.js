@@ -49,24 +49,54 @@ function autoDetectGameDir() {
   return "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins";
 }
 
-// Scans your existing project folders for the compiled convoygate_plugin.dll
+// Scans project and installed paths for convoygate_plugin.dll
 function locateCompiledPlugin() {
-  const root = path.join(__dirname, "../..");
   const searchLocations = [
-    path.join(root, "plugin", PLUGIN_FILENAME),
-    path.join(root, "plugin", "build", PLUGIN_FILENAME),
-    path.join(root, "plugin", "build", "Release", PLUGIN_FILENAME),
-    path.join(root, "plugin", "build", "Debug", PLUGIN_FILENAME),
-    path.join(root, "plugin", "Release", PLUGIN_FILENAME),
-    path.join(root, "plugin", "bin", PLUGIN_FILENAME),
+    // Installed application paths ($INSTDIR)
+    path.join(process.resourcesPath, "..", PLUGIN_FILENAME),
+    path.join(process.resourcesPath, "..", "build", "Release", PLUGIN_FILENAME),
+    path.join(process.resourcesPath, "..", "Release", PLUGIN_FILENAME),
     path.join(process.resourcesPath, PLUGIN_FILENAME),
-    path.join(process.resourcesPath, "assets", PLUGIN_FILENAME)
+    // Local development workspace paths (relative to client/src/)
+    path.join(__dirname, "../../plugin", PLUGIN_FILENAME),
+    path.join(__dirname, "../../plugin/build/Release", PLUGIN_FILENAME),
+    path.join(__dirname, "../../plugin/build", PLUGIN_FILENAME),
+    path.join(__dirname, "../../plugin/Release", PLUGIN_FILENAME),
+    path.join(__dirname, "../../plugin/bin", PLUGIN_FILENAME),
+    path.join(__dirname, "../", PLUGIN_FILENAME)
   ];
 
   for (const loc of searchLocations) {
-    if (fs.existsSync(loc)) return loc;
+    try {
+      if (fs.existsSync(loc)) return loc;
+    } catch (_) {}
   }
   return null;
+}
+
+function isPluginInstalled() {
+  const target = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  return fs.existsSync(target);
+}
+
+// 100% silent injection with zero popups or file dialogs
+function silentlyInjectPlugin() {
+  const targetPlugin = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  if (fs.existsSync(targetPlugin)) return true;
+
+  const src = locateCompiledPlugin();
+  if (src && fs.existsSync(src)) {
+    try {
+      if (!fs.existsSync(userSettings.gameDir)) {
+        fs.mkdirSync(userSettings.gameDir, { recursive: true });
+      }
+      fs.copyFileSync(src, targetPlugin);
+      return fs.existsSync(targetPlugin);
+    } catch (e) {
+      return false;
+    }
+  }
+  return false;
 }
 
 let userSettings = {
@@ -202,28 +232,15 @@ function purgeAllManagedMods(reason) {
   }
 }
 
-function attemptAutoInjectPlugin() {
-  const targetPlugin = path.join(userSettings.gameDir, PLUGIN_FILENAME);
-  if (!fs.existsSync(targetPlugin)) {
-    const src = locateCompiledPlugin();
-    if (src && fs.existsSync(src)) {
-      try {
-        fs.mkdirSync(userSettings.gameDir, { recursive: true });
-        fs.copyFileSync(src, targetPlugin);
-      } catch (e) {}
-    }
-  }
-}
-
 async function auditSubscriberStatusAndEnforce() {
   const session = loadSession();
-  attemptAutoInjectPlugin();
+  silentlyInjectPlugin();
 
-  const pluginFile = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  const hasPlugin = isPluginInstalled();
   const trackedMods = loadManagedMods();
 
-  if (trackedMods.length > 0 && !fs.existsSync(pluginFile)) {
-    purgeAllManagedMods("convoygate_plugin.dll is missing from your game plugins directory. All managed mods removed.");
+  if (trackedMods.length > 0 && !hasPlugin) {
+    purgeAllManagedMods("convoygate_plugin.dll missing from game plugins directory. All managed mods removed.");
     return false;
   }
 
@@ -460,7 +477,7 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
 
-  attemptAutoInjectPlugin();
+  silentlyInjectPlugin();
 
   setTimeout(auditSubscriberStatusAndEnforce, 2000);
   watchdogInterval = setInterval(auditSubscriberStatusAndEnforce, 30 * 1000);
@@ -544,52 +561,21 @@ ipcMain.handle("update-settings", (event, newSettings) => {
   return userSettings;
 });
 
-// Checks for convoygate_plugin.dll
 ipcMain.handle("audit-plugin", () => {
   const pluginFile = path.join(userSettings.gameDir, PLUGIN_FILENAME);
   const exists = fs.existsSync(pluginFile);
-  const foundSrc = locateCompiledPlugin();
-  return { valid: exists, path: pluginFile, gameDir: userSettings.gameDir, hasSource: !!foundSrc };
+  return { valid: exists, path: pluginFile, gameDir: userSettings.gameDir };
 });
 
-// Re-injects convoygate_plugin.dll into ATS
-ipcMain.handle("reinstall-plugin", async () => {
-  try {
-    let sourcePath = locateCompiledPlugin();
-
-    // If not automatically found in project, prompt with a file picker
-    if (!sourcePath || !fs.existsSync(sourcePath)) {
-      const pick = await dialog.showOpenDialog(mainWindow, {
-        title: "Locate convoygate_plugin.dll",
-        filters: [{ name: "Dynamic Link Library (*.dll)", extensions: ["dll"] }],
-        properties: ["openFile"]
-      });
-
-      if (pick.canceled || !pick.filePaths.length) {
-        return {
-          success: false,
-          error: "convoygate_plugin.dll not found. Please compile the plugin or browse to it."
-        };
-      }
-      sourcePath = pick.filePaths[0];
-    }
-
-    const targetDir = userSettings.gameDir;
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
-
-    const targetPath = path.join(targetDir, PLUGIN_FILENAME);
-    fs.copyFileSync(sourcePath, targetPath);
-
-    if (!fs.existsSync(targetPath)) {
-      return { success: false, error: "Failed to copy convoygate_plugin.dll. Please check permissions." };
-    }
-
+// Re-injects silently without ANY dialog or popup
+ipcMain.handle("reinstall-plugin", () => {
+  const targetPath = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  if (fs.existsSync(targetPath)) {
     return { success: true, path: targetPath };
-  } catch (err) {
-    return { success: false, error: err.message };
   }
+
+  const ok = silentlyInjectPlugin();
+  return { success: ok || fs.existsSync(targetPath), path: targetPath };
 });
 
 ipcMain.handle("dialog-browse-dir", async (event, type) => {

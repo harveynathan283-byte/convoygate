@@ -14,9 +14,18 @@
     "directories": {
       "output": "dist"
     },
+    "extraFiles": [
+      {
+        "from": "../plugin",
+        "to": ".",
+        "filter": [
+          "**/convoygate_plugin.dll",
+          "convoygate_plugin.dll"
+        ]
+      }
+    ],
     "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
+      "target": "nsis"
     },
     "nsis": {
       "oneClick": false,
