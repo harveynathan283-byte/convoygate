@@ -1,19 +1,11 @@
 {
   "name": "convoygate-client",
   "version": "1.0.0",
-  "description": "ConvoyGate ATS & ETS2 Mod Sync & Decryption Engine",
+  "description": "ConvoyGate Mod Manager Client",
   "main": "src/main.js",
-  "author": "ConvoyGate",
   "scripts": {
     "start": "electron .",
-    "build:win": "electron-builder --win --x64"
-  },
-  "dependencies": {
-    "axios": "^1.6.8"
-  },
-  "devDependencies": {
-    "electron": "^29.1.4",
-    "electron-builder": "^24.13.3"
+    "build": "electron-builder --win --x64"
   },
   "build": {
     "appId": "com.convoygate.client",
@@ -22,7 +14,8 @@
       "output": "dist"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -31,7 +24,14 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "ConvoyGate",
-      "runAfterFinish": true
+      "include": "installer.nsh"
     }
+  },
+  "dependencies": {
+    "axios": "^1.6.8"
+  },
+  "devDependencies": {
+    "electron": "^29.1.0",
+    "electron-builder": "^24.13.3"
   }
 }

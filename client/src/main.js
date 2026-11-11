@@ -9,11 +9,12 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let syncInterval = null;
-let leaseAuditInterval = null;
+let watchdogInterval = null;
 
 const SERVER_URL = "https://api.convoygate.com";
 const SESSION_FILE = path.join(app.getPath("userData"), "session.json");
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
+const MANAGED_MODS_FILE = path.join(app.getPath("userData"), "managed_mods.json");
 
 function getDefaultModDir() {
   const home = os.homedir();
@@ -61,9 +62,7 @@ function saveSettings(newSettings) {
 
 function loadSession() {
   try {
-    if (fs.existsSync(SESSION_FILE)) {
-      return JSON.parse(fs.readFileSync(SESSION_FILE, "utf8"));
-    }
+    if (fs.existsSync(SESSION_FILE)) return JSON.parse(fs.readFileSync(SESSION_FILE, "utf8"));
   } catch (e) {}
   return null;
 }
@@ -80,74 +79,122 @@ function clearSession() {
   } catch (e) {}
 }
 
+function loadManagedMods() {
+  try {
+    if (fs.existsSync(MANAGED_MODS_FILE)) return JSON.parse(fs.readFileSync(MANAGED_MODS_FILE, "utf8"));
+  } catch (e) {}
+  return [];
+}
+
+function recordManagedMod(modId) {
+  const list = loadManagedMods();
+  if (!list.includes(modId)) {
+    list.push(modId);
+    try {
+      fs.writeFileSync(MANAGED_MODS_FILE, JSON.stringify(list, null, 2), "utf8");
+    } catch (e) {}
+  }
+}
+
+function removeManagedModRecord(modId) {
+  let list = loadManagedMods();
+  list = list.filter(id => id !== modId);
+  try {
+    fs.writeFileSync(MANAGED_MODS_FILE, JSON.stringify(list, null, 2), "utf8");
+  } catch (e) {}
+}
+
 function getHWID() {
   const network = JSON.stringify(os.networkInterfaces());
   const raw = `${os.hostname()}_${os.platform()}_${os.arch()}_${network}`;
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
-// Active Killswitch & Heartbeat Lease Auditor
-async function auditSubscriberLeaseAndEnforce() {
-  const session = loadSession();
+function purgeAllManagedMods(reason) {
+  const trackedMods = loadManagedMods();
   const destDir = userSettings.modDir;
-  let isValid = false;
+  let purgedCount = 0;
 
-  if (session && session.token) {
-    try {
-      const res = await axios.post(
-        `${SERVER_URL}/api/v1/license/lease`,
-        { hwid: getHWID() },
-        { headers: { Authorization: `Bearer ${session.token}` }, timeout: 6000 }
-      );
-      if (res.data && res.data.success) {
-        isValid = true;
-        if (fs.existsSync(userSettings.gameDir)) {
-          const keyPath = path.join(userSettings.gameDir, "convoygate.key");
-          fs.writeFileSync(keyPath, JSON.stringify(res.data.lease), "utf8");
-        }
-      }
-    } catch (err) {
-      isValid = false;
+  trackedMods.forEach((modId) => {
+    const filePath = path.join(destDir, `${modId}.scs`);
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        purgedCount++;
+      } catch (e) {}
     }
+  });
+
+  try {
+    fs.writeFileSync(MANAGED_MODS_FILE, JSON.stringify([], null, 2), "utf8");
+  } catch (e) {}
+
+  const keyPath = path.join(userSettings.gameDir, "convoygate.key");
+  if (fs.existsSync(keyPath)) {
+    try { fs.unlinkSync(keyPath); } catch (e) {}
   }
 
-  // If subscription or lease is invalid, wipe all mods from disk immediately
-  if (!isValid) {
-    let purged = 0;
-    if (fs.existsSync(destDir)) {
-      const files = fs.readdirSync(destDir);
-      files.forEach((f) => {
-        if (f.endsWith(".scs")) {
-          try {
-            fs.unlinkSync(path.join(destDir, f));
-            purged++;
-          } catch (e) {}
-        }
-      });
-    }
+  if (purgedCount > 0 && Notification.isSupported()) {
+    new Notification({
+      title: "ConvoyGate Security Action",
+      body: reason || "Subscription role or core plugin removed. Managed mods uninstalled."
+    }).show();
+  }
 
-    if (fs.existsSync(userSettings.gameDir)) {
-      const keyPath = path.join(userSettings.gameDir, "convoygate.key");
-      if (fs.existsSync(keyPath)) {
-        try { fs.unlinkSync(keyPath); } catch (e) {}
-      }
-    }
-
-    if (purged > 0 && Notification.isSupported()) {
-      new Notification({
-        title: "ConvoyGate Access Revoked",
-        body: "Subscriber role or key expired. Protected mods have been removed from your game."
-      }).show();
-    }
-
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("sync-completed");
-    }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("sync-completed");
   }
 }
 
-// Background Silent Mod Updater
+// Active Watchdog: Audits Discord role, lease validity, and DLL presence
+async function auditSubscriberStatusAndEnforce() {
+  const session = loadSession();
+  const pluginFile = path.join(userSettings.gameDir, "convoygate.dll");
+
+  // Rule 1: User deleted or uninstalled convoygate.dll
+  if (!fs.existsSync(pluginFile)) {
+    purgeAllManagedMods("convoygate.dll was deleted from the game plugins directory. All managed mods removed.");
+    return false;
+  }
+
+  // Rule 2: No active session
+  if (!session || !session.token) {
+    purgeAllManagedMods("No active Discord login found. All managed mods removed.");
+    return false;
+  }
+
+  // Rule 3: Active Discord role validation with VPS
+  try {
+    const res = await axios.post(
+      `${SERVER_URL}/api/v1/license/lease`,
+      { hwid: getHWID() },
+      { headers: { Authorization: `Bearer ${session.token}` }, timeout: 6000 }
+    );
+
+    if (res.data && res.data.success) {
+      if (fs.existsSync(userSettings.gameDir)) {
+        const keyPath = path.join(userSettings.gameDir, "convoygate.key");
+        fs.writeFileSync(keyPath, JSON.stringify(res.data.lease), "utf8");
+      }
+      return true;
+    } else {
+      purgeAllManagedMods("Discord subscriber role is no longer active. Mods de-authorized.");
+      return false;
+    }
+  } catch (err) {
+    if (err.response && (err.response.status === 401 || err.response.status === 403)) {
+      purgeAllManagedMods("Discord subscriber role revoked. All managed mods deleted.");
+      return false;
+    }
+    return true;
+  }
+}
+
+// Background sync & cloud catalog pruning
 async function runSilentBackgroundUpdate(notifyUser = false) {
+  const isAuthorized = await auditSubscriberStatusAndEnforce();
+  if (!isAuthorized) return;
+
   const session = loadSession();
   if (!session || !session.token) return;
 
@@ -155,10 +202,25 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
     const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
     if (!res.data || !res.data.success) return;
 
-    const remoteMods = res.data.mods;
+    const remoteMods = res.data.mods || [];
+    const remoteModIds = new Set(remoteMods.map(m => m.id));
     const destDir = userSettings.modDir;
-    let updatedCount = 0;
+    const trackedMods = loadManagedMods();
 
+    // Rule 4: If a mod is removed by admin from publisher, delete it on client system
+    for (const localModId of trackedMods) {
+      if (!remoteModIds.has(localModId)) {
+        const localFile = path.join(destDir, `${localModId}.scs`);
+        if (fs.existsSync(localFile)) {
+          try {
+            fs.unlinkSync(localFile);
+          } catch (e) {}
+        }
+        removeManagedModRecord(localModId);
+      }
+    }
+
+    let updatedCount = 0;
     for (const mod of remoteMods) {
       const localFile = path.join(destDir, `${mod.id}.scs`);
       let needsDownload = false;
@@ -191,6 +253,7 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
 
           if (fs.existsSync(localFile)) fs.unlinkSync(localFile);
           fs.renameSync(tempFile, localFile);
+          recordManagedMod(mod.id);
           updatedCount++;
         } catch (e) {
           if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
@@ -249,12 +312,6 @@ function createWindow() {
     if (!isQuitting && userSettings.backgroundSync) {
       event.preventDefault();
       mainWindow.hide();
-      if (Notification.isSupported()) {
-        new Notification({
-          title: "ConvoyGate is active",
-          body: "ConvoyGate is running in the system tray to keep your mods updated."
-        }).show();
-      }
       return false;
     }
   });
@@ -305,11 +362,9 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
 
-  // Audit lease right away and every 60 seconds
-  setTimeout(auditSubscriberLeaseAndEnforce, 2000);
-  leaseAuditInterval = setInterval(auditSubscriberLeaseAndEnforce, 60 * 1000);
+  setTimeout(auditSubscriberStatusAndEnforce, 2000);
+  watchdogInterval = setInterval(auditSubscriberStatusAndEnforce, 30 * 1000);
 
-  // Background catalog update check
   syncInterval = setInterval(() => {
     if (userSettings.backgroundSync) {
       runSilentBackgroundUpdate(false);
@@ -345,7 +400,7 @@ async function handleDiscordLogin() {
         const sessionData = { token, user: { username } };
         saveSession(sessionData);
         authWin.close();
-        auditSubscriberLeaseAndEnforce();
+        auditSubscriberStatusAndEnforce();
         resolve({ success: true, ...sessionData });
       }
     });
@@ -370,7 +425,7 @@ ipcMain.handle("get-stored-session", async () => {
 
 ipcMain.handle("logout", () => {
   clearSession();
-  auditSubscriberLeaseAndEnforce();
+  purgeAllManagedMods("Logged out of Discord session.");
   return { success: true };
 });
 
@@ -400,8 +455,6 @@ ipcMain.handle("reinstall-plugin", () => {
     const bundledPath = path.join(__dirname, "..", "assets", "convoygate.dll");
     if (fs.existsSync(bundledPath)) {
       fs.copyFileSync(bundledPath, targetPath);
-    } else {
-      fs.writeFileSync(targetPath, Buffer.from("ConvoyGate-Hook-x64"));
     }
     return { success: true, path: targetPath };
   } catch (err) {
@@ -422,8 +475,21 @@ ipcMain.handle("fetch-catalog", async () => {
   try {
     const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
     const mods = res.data?.mods || [];
-    const installed = {};
+    const remoteModIds = new Set(mods.map(m => m.id));
+    const destDir = userSettings.modDir;
+    const trackedMods = loadManagedMods();
 
+    for (const localModId of trackedMods) {
+      if (!remoteModIds.has(localModId)) {
+        const localFile = path.join(destDir, `${localModId}.scs`);
+        if (fs.existsSync(localFile)) {
+          try { fs.unlinkSync(localFile); } catch (e) {}
+        }
+        removeManagedModRecord(localModId);
+      }
+    }
+
+    const installed = {};
     mods.forEach(mod => {
       const localPath = path.join(userSettings.modDir, `${mod.id}.scs`);
       if (fs.existsSync(localPath)) {
@@ -445,13 +511,10 @@ ipcMain.handle("fetch-catalog", async () => {
     return { success: false, error: err.message };
   }
 });
-ipcMain.handle("get-catalog", async () => {
-  return await ipcMain.handlers["fetch-catalog"]();
-});
 
 ipcMain.handle("get-single-mod-details", async (event, mod) => {
   const targetPath = path.join(userSettings.modDir, `${mod.id}.scs`);
-  let description = `Package: ${mod.name}\nVersion: ${mod.version}\nTier: ${mod.tier || "All Tiers"}\n\nProtected by ConvoyGate Decryption Streaming.`;
+  let description = `Package: ${mod.name}\nVersion: ${mod.version}\nTier: ${mod.tier || "All Tiers"}\n\nSynced via ConvoyGate.`;
   let iconBase64 = null;
 
   if (fs.existsSync(targetPath)) {
@@ -515,7 +578,7 @@ ipcMain.handle("install-single-mod", async (event, modId) => {
   const tempFile = path.join(userSettings.modDir, `${modId}.scs.download`);
 
   try {
-    event.sender.send("queue-progress", { message: `Requesting lease & stream for ${modId}...`, percent: 20 });
+    event.sender.send("queue-progress", { message: `Requesting stream for ${modId}...`, percent: 20 });
 
     const res = await axios({
       method: "GET",
@@ -533,6 +596,7 @@ ipcMain.handle("install-single-mod", async (event, modId) => {
 
     if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
     fs.renameSync(tempFile, targetFile);
+    recordManagedMod(modId);
 
     event.sender.send("queue-progress", { message: `Installed ${modId}.scs`, percent: 100 });
     return { success: true };
@@ -540,9 +604,6 @@ ipcMain.handle("install-single-mod", async (event, modId) => {
     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     return { success: false, error: err.response?.data?.error || err.message };
   }
-});
-ipcMain.handle("download-mod", async (event, modId) => {
-  return await ipcMain.handlers["install-single-mod"](event, modId);
 });
 
 ipcMain.handle("install-all-mods", async (event) => {
@@ -580,6 +641,7 @@ ipcMain.handle("install-all-mods", async (event) => {
 
       if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
       fs.renameSync(tempFile, targetFile);
+      recordManagedMod(mod.id);
       processed++;
     }
 
@@ -593,23 +655,13 @@ ipcMain.handle("install-all-mods", async (event) => {
 ipcMain.handle("uninstall-mod", (event, modId) => {
   const p = path.join(userSettings.modDir, `${modId}.scs`);
   if (fs.existsSync(p)) fs.unlinkSync(p);
+  removeManagedModRecord(modId);
   return { success: true };
 });
 
 ipcMain.handle("uninstall-all-mods", () => {
-  let count = 0;
-  if (fs.existsSync(userSettings.modDir)) {
-    const files = fs.readdirSync(userSettings.modDir);
-    files.forEach(f => {
-      if (f.endsWith(".scs")) {
-        try {
-          fs.unlinkSync(path.join(userSettings.modDir, f));
-          count++;
-        } catch (e) {}
-      }
-    });
-  }
-  return { success: true, removedCount: count };
+  purgeAllManagedMods("User triggered clean uninstall.");
+  return { success: true };
 });
 
 ipcMain.handle("sync-now", async () => {

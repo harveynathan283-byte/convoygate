@@ -28,7 +28,6 @@
       padding: 0;
     }
 
-    /* Custom Sleek Scrollbars */
     ::-webkit-scrollbar {
       width: 8px;
       height: 8px;
@@ -55,7 +54,6 @@
       user-select: none;
     }
 
-    /* Full Viewport Scrolling Container */
     .admin-viewport {
       flex: 1;
       overflow-y: auto;
@@ -66,7 +64,6 @@
       gap: 20px;
     }
 
-    /* Persistent Discord Admin Overlay */
     .login-overlay {
       position: fixed;
       top: 0;
@@ -291,7 +288,6 @@
       background: rgba(239, 68, 68, 0.3);
     }
 
-    /* Live Upload Progress Card */
     .upload-progress-card {
       display: none;
       background: var(--bg-surface);
@@ -302,7 +298,6 @@
       flex-direction: column;
       gap: 10px;
       flex-shrink: 0;
-      animation: fadeIn 0.2s ease;
     }
 
     .upload-progress-header {
@@ -354,9 +349,9 @@
       font-weight: 600;
       flex-shrink: 0;
     }
-    .alert-banner.error { display: block; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); color: var(--danger); }
-    .alert-banner.success { display: block; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.4); color: var(--success); }
-    .alert-banner.info { display: block; background: rgba(2, 132, 199, 0.15); border: 1px solid rgba(2, 132, 199, 0.4); color: var(--accent-cyan); }
+    .alert-banner.error { display: block; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.5); color: #fca5a5; }
+    .alert-banner.success { display: block; background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.5); color: #6ee7b7; }
+    .alert-banner.info { display: block; background: rgba(2, 132, 199, 0.15); border: 1px solid rgba(2, 132, 199, 0.5); color: #7dd3fc; }
 
     .catalog-section {
       display: flex;
@@ -408,7 +403,6 @@
       gap: 8px;
     }
 
-    /* Modal Styling */
     .modal-overlay {
       display: none;
       position: fixed;
@@ -525,7 +519,6 @@
       margin-top: 8px;
     }
 
-    /* Sub-Mod Manager List Items */
     .submod-list {
       display: flex;
       flex-direction: column;
@@ -604,7 +597,7 @@
       <button class="btn btn-primary" onclick="loadCatalog()">🔄 Refresh Catalog</button>
     </div>
 
-    <!-- Live Uploading Progress Card with Percent & MBs -->
+    <!-- Live Uploading Progress Card -->
     <div class="upload-progress-card" id="uploadProgressCard">
       <div class="upload-progress-header">
         <div class="upload-status-title" id="uploadStatusText">Preparing package...</div>
@@ -641,7 +634,7 @@
     </section>
   </div>
 
-  <!-- Adaptive Publish Modal (Queue & MegaPack) -->
+  <!-- Adaptive Publish Modal -->
   <div class="modal-overlay" id="publishModal">
     <div class="modal-card">
       <div class="modal-header">
@@ -661,11 +654,9 @@
       <div class="form-group" id="packageTypeGroup">
         <label>Packaging Mode</label>
         <select id="selectPackageType" onchange="onPackageTypeChange()">
-          <!-- Populated dynamically depending on single vs multiple files -->
         </select>
       </div>
 
-      <!-- Mega Pack Target Section -->
       <div id="megaPackSection" style="display: none; flex-direction: column; gap: 14px;">
         <div class="form-group">
           <label>Target Mega Pack</label>
@@ -703,7 +694,7 @@
 
       <div class="modal-actions">
         <button class="btn" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" id="btnConfirmPublish" onclick="submitPublish()">Encrypt & Publish to VPS</button>
+        <button class="btn btn-primary" id="btnConfirmPublish" onclick="submitPublish()">Publish to VPS</button>
       </div>
     </div>
   </div>
@@ -717,7 +708,6 @@
       </div>
 
       <div class="submod-list" id="subModListContainer">
-        <!-- Rendered Dynamically -->
       </div>
 
       <div class="modal-actions">
@@ -846,16 +836,14 @@
       populateMegaPackSelect();
 
       modalFileList.innerHTML = paths.map(p => `<div>• ${p.split(/[\\/]/).pop()}</div>`).join("");
-
-      // Always show packaging mode selector
       packageTypeGroup.style.display = "flex";
 
       if (paths.length > 1) {
         selectPackageType.innerHTML = `
-          <option value="single_queue">Batch Single Mods (Publish Each Individually)</option>
           <option value="megapack">Mega Pack (Merge into 1 Combined Archive)</option>
+          <option value="single_queue">Batch Single Mods (Publish Each Individually)</option>
         `;
-        selectPackageType.value = "single_queue";
+        selectPackageType.value = "megapack";
       } else {
         selectPackageType.innerHTML = `
           <option value="single">Single Standalone Mod</option>
@@ -892,9 +880,8 @@
         document.getElementById("lblDisplayName").innerText = `Display Name (${currentQueueIndex + 1}/${queuedFiles.length}: ${pathBase(currentFilePath)})`;
 
         const isLast = currentQueueIndex === queuedFiles.length - 1;
-        btnConfirmPublish.innerText = isLast ? "Encrypt & Publish All Mods" : `Next Mod (${currentQueueIndex + 1}/${queuedFiles.length}) →`;
+        btnConfirmPublish.innerText = isLast ? "Publish All Mods" : `Next Mod (${currentQueueIndex + 1}/${queuedFiles.length}) →`;
       } else {
-        // Single standalone mod
         queueBadge.style.display = "none";
         selectedFilesGroup.style.display = "flex";
         megaPackSection.style.display = "none";
@@ -903,7 +890,7 @@
         const baseName = queuedFiles[0].split(/[\\/]/).pop().replace(/\.(scs|zip)$/i, "");
         document.getElementById("inputDisplayName").value = baseName.replace(/[_-]/g, " ");
         document.getElementById("lblDisplayName").innerText = "Display Name";
-        btnConfirmPublish.innerText = "Encrypt & Publish to VPS";
+        btnConfirmPublish.innerText = "Publish to VPS";
       }
     }
 
@@ -958,6 +945,12 @@
       uploadProgressCard.style.display = "none";
     }
 
+    function showAlert(msg, type) {
+      alertBanner.style.display = "block"; // Explicitly clear any inline display:none
+      alertBanner.className = `alert-banner ${type}`;
+      alertBanner.innerText = msg;
+    }
+
     async function submitPublish() {
       const isMega = selectPackageType.value === "megapack";
       const isQueue = selectPackageType.value === "single_queue" && queuedFiles.length > 1;
@@ -985,26 +978,34 @@
         }
 
         closeModal();
-        showUploadCard(`Assembling & encrypting Mega Pack: ${megaPackName}...`);
+        showUploadCard(`Staging & assembling Mega Pack: ${megaPackName}...`);
 
-        const res = await ipcRenderer.invoke("publish-package-adaptive", {
-          isMegaPack: true,
-          filePaths: filesToPublish,
-          megaPackId,
-          megaPackName,
-          version,
-          tier
-        });
+        try {
+          const res = await ipcRenderer.invoke("publish-package-adaptive", {
+            isMegaPack: true,
+            filePaths: filesToPublish,
+            megaPackId,
+            megaPackName,
+            version,
+            tier
+          });
 
-        if (res && res.success) {
-          updateUploadCard(`Uploaded: 100% - Mega Pack ${megaPackName} live!`, 100);
-          uploadProgressBar.style.background = "#10b981";
-          setTimeout(hideUploadCard, 4000);
-          showAlert(`Successfully published Mega Pack: ${megaPackName}`, "success");
-          await loadCatalog();
-        } else {
-          hideUploadCard();
-          showAlert(`Failed to publish: ${res ? res.error : "Unknown error"}`, "error");
+          if (res && res.success) {
+            updateUploadCard(`Uploaded: 100% - Mega Pack ${megaPackName} live!`, 100);
+            uploadProgressBar.style.background = "#10b981";
+            setTimeout(hideUploadCard, 4000);
+            showAlert(`Successfully published Mega Pack: ${megaPackName}`, "success");
+            await loadCatalog();
+          } else {
+            uploadProgressBar.style.background = "#ef4444";
+            const errStr = res && res.error ? res.error : "Backend rejected upload.";
+            updateUploadCard(`Failed: ${errStr}`, 100);
+            showAlert(`Failed to publish: ${errStr}`, "error");
+          }
+        } catch (e) {
+          uploadProgressBar.style.background = "#ef4444";
+          updateUploadCard(`System Error: ${e.message}`, 100);
+          showAlert(`Error: ${e.message}`, "error");
         }
 
       } else if (isQueue) {
@@ -1033,12 +1034,11 @@
         } else {
           const itemsToUpload = [...collectedQueue];
           closeModal();
-
           showUploadCard(`Starting batch upload (0/${itemsToUpload.length})...`);
 
           for (let i = 0; i < itemsToUpload.length; i++) {
             const item = itemsToUpload[i];
-            updateUploadCard(`[${i + 1}/${itemsToUpload.length}] Securing & uploading ${item.name}...`, 0);
+            updateUploadCard(`[${i + 1}/${itemsToUpload.length}] Packaging & uploading ${item.name}...`, 0);
 
             const res = await ipcRenderer.invoke("publish-package-adaptive", {
               isMegaPack: false,
@@ -1050,8 +1050,10 @@
             });
 
             if (!res || !res.success) {
-              hideUploadCard();
-              showAlert(`Failed on [${i + 1}/${itemsToUpload.length}] ${item.name}: ${res ? res.error : "Unknown error"}`, "error");
+              uploadProgressBar.style.background = "#ef4444";
+              const errStr = res && res.error ? res.error : "Upload failed.";
+              updateUploadCard(`Failed on ${item.name}: ${errStr}`, 100);
+              showAlert(`Failed on [${i + 1}/${itemsToUpload.length}] ${item.name}: ${errStr}`, "error");
               await loadCatalog();
               return;
             }
@@ -1065,7 +1067,6 @@
         }
 
       } else {
-        // Single Mod Drop (Standalone)
         const singleFile = queuedFiles[0];
         const name = document.getElementById("inputDisplayName").value.trim();
         const version = document.getElementById("inputVersion").value || "1.0.0";
@@ -1079,26 +1080,34 @@
         const modId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
 
         closeModal();
-        showUploadCard(`Encrypting & uploading ${name}...`);
+        showUploadCard(`Packaging & uploading ${name}...`);
 
-        const res = await ipcRenderer.invoke("publish-package-adaptive", {
-          isMegaPack: false,
-          filePaths: [singleFile],
-          name,
-          modId,
-          version,
-          tier
-        });
+        try {
+          const res = await ipcRenderer.invoke("publish-package-adaptive", {
+            isMegaPack: false,
+            filePaths: [singleFile],
+            name,
+            modId,
+            version,
+            tier
+          });
 
-        if (res && res.success) {
-          updateUploadCard(`Uploaded: 100% - ${name} is live!`, 100);
-          uploadProgressBar.style.background = "#10b981";
-          setTimeout(hideUploadCard, 4000);
-          showAlert(`Successfully published: ${name}`, "success");
-          await loadCatalog();
-        } else {
-          hideUploadCard();
-          showAlert(`Failed to publish: ${res ? res.error : "Unknown error"}`, "error");
+          if (res && res.success) {
+            updateUploadCard(`Uploaded: 100% - ${name} is live!`, 100);
+            uploadProgressBar.style.background = "#10b981";
+            setTimeout(hideUploadCard, 4000);
+            showAlert(`Successfully published: ${name}`, "success");
+            await loadCatalog();
+          } else {
+            uploadProgressBar.style.background = "#ef4444";
+            const errStr = res && res.error ? res.error : "Backend rejected upload.";
+            updateUploadCard(`Failed: ${errStr}`, 100);
+            showAlert(`Failed to publish: ${errStr}`, "error");
+          }
+        } catch (e) {
+          uploadProgressBar.style.background = "#ef4444";
+          updateUploadCard(`System Error: ${e.message}`, 100);
+          showAlert(`Error: ${e.message}`, "error");
         }
       }
     }
@@ -1173,7 +1182,7 @@
     }
 
     async function removeSubMod(megaPackId, fileName) {
-      if (!confirm(`Are you sure you want to remove '${fileName}' from this Mega Pack? The Mega Pack will be re-encrypted and re-uploaded automatically.`)) {
+      if (!confirm(`Are you sure you want to remove '${fileName}' from this Mega Pack? The Mega Pack will be re-packaged and re-uploaded automatically.`)) {
         return;
       }
 
@@ -1194,7 +1203,8 @@
         }
         await loadCatalog();
       } else {
-        hideUploadCard();
+        uploadProgressBar.style.background = "#ef4444";
+        updateUploadCard(`Failed: ${res ? res.error : "Unknown error"}`, 100);
         showAlert(`Failed to remove mod: ${res ? res.error : "Unknown error"}`, "error");
       }
     }
@@ -1208,11 +1218,6 @@
       } else {
         showAlert(`Failed to delete: ${res ? res.error : "Unknown error"}`, "error");
       }
-    }
-
-    function showAlert(msg, type) {
-      alertBanner.className = `alert-banner ${type}`;
-      alertBanner.innerText = msg;
     }
 
     ipcRenderer.on("publish-status", (event, data) => {

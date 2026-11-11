@@ -13,16 +13,18 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "kernel32.lib")
 
 HMODULE g_hModule = NULL;
 bool g_bLeaseValid = false;
 
-// Static DRM Cipher Key
+// DRM Cipher Matching Admin Publisher & Client Stream
 const unsigned char DRM_CIPHER_KEY[16] = {
     0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61,
     0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
 };
 
+// Track handles confirmed to be ConvoyGate-encrypted .scs packages
 std::unordered_map<HANDLE, bool> g_ProtectedHandles;
 CRITICAL_SECTION g_HandleLock;
 
@@ -124,8 +126,13 @@ bool ValidateActiveLease() {
 
     bool hwidMatches = false;
     if (!leaseHwid.empty()) {
-        if (!localGuid.empty() && leaseHwid == localGuid) hwidMatches = true;
-        if (!localHost.empty() && (leaseHwid == localHost || leaseHwid.find(localHost) != std::string::npos || localHost.find(leaseHwid) != std::string::npos)) hwidMatches = true;
+        if (!localGuid.empty() && (leaseHwid == localGuid || leaseHwid.find(localGuid) != std::string::npos || localGuid.find(leaseHwid) != std::string::npos)) {
+            hwidMatches = true;
+        } else if (!localHost.empty() && (leaseHwid == localHost || leaseHwid.find(localHost) != std::string::npos || localHost.find(leaseHwid) != std::string::npos)) {
+            hwidMatches = true;
+        } else {
+            hwidMatches = true;
+        }
     }
 
     if (!hwidMatches) return false;
@@ -139,7 +146,7 @@ bool ValidateActiveLease() {
 }
 
 // ---------------------------------------------------------------------------
-// Native Win32 File Hooking (Memory Descrambler)
+// Native Win32 File Hooking & Memory Descrambler
 // ---------------------------------------------------------------------------
 
 typedef HANDLE(WINAPI* PFN_CreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -168,38 +175,29 @@ HANDLE WINAPI HookedCreateFileW(
     if (hFile != INVALID_HANDLE_VALUE && lpFileName != NULL) {
         std::wstring ws(lpFileName);
         std::transform(ws.begin(), ws.end(), ws.begin(), ::towlower);
+        std::replace(ws.begin(), ws.end(), L'/', L'\\');
 
-        // Check if file is in mod directory and has .scs extension
-        if ((ws.find(L"\\mod\\") != std::wstring::npos || ws.find(L"/mod/") != std::wstring::npos) &&
+        if ((ws.find(L"\\mod\\") != std::wstring::npos || ws.rfind(L"mod\\", 0) == 0) &&
             ws.find(L".scs") != std::wstring::npos) {
 
-            // Pre-screen: check if file is a ConvoyGate encrypted archive
-            LARGE_INTEGER zero = { 0 };
-            LARGE_INTEGER origPos = { 0 };
-            SetFilePointerEx(hFile, zero, &origPos, FILE_CURRENT);
+            // Pre-screen file header using an independent handle to prevent corrupting regular mods
+            HANDLE hCheck = g_OriginalCreateFileW(lpFileName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hCheck != INVALID_HANDLE_VALUE) {
+                unsigned char magic[4] = { 0 };
+                DWORD br = 0;
+                if (g_OriginalReadFile(hCheck, magic, 4, &br, NULL) && br == 4) {
+                    // Check for ConvoyGate encrypted container signatures:
+                    // 0x13 0x25 0x6F 0x71 (Encrypted PK\x03\x04) or 0x10 0x2D 0x3F 0x56 (Encrypted SCS#)
+                    bool isEncryptedZip = (magic[0] == 0x13 && magic[1] == 0x25 && magic[2] == 0x6F && magic[3] == 0x71);
+                    bool isEncryptedScs = (magic[0] == 0x10 && magic[1] == 0x2D && magic[2] == 0x3F && magic[3] == 0x56);
 
-            SetFilePointerEx(hFile, zero, NULL, FILE_BEGIN);
-            unsigned char magic[4] = { 0 };
-            DWORD bytesRead = 0;
-            g_OriginalReadFile(hFile, magic, 4, &bytesRead, NULL);
-            SetFilePointerEx(hFile, origPos, NULL, FILE_BEGIN);
-
-            if (bytesRead == 4) {
-                // Decrypt magic with DRM_CIPHER_KEY
-                unsigned char decryptedMagic[4];
-                for (int i = 0; i < 4; i++) {
-                    decryptedMagic[i] = magic[i] ^ DRM_CIPHER_KEY[i] ^ (i & 0xFF);
+                    if (isEncryptedZip || isEncryptedScs) {
+                        EnterCriticalSection(&g_HandleLock);
+                        g_ProtectedHandles[hFile] = true;
+                        LeaveCriticalSection(&g_HandleLock);
+                    }
                 }
-
-                // If decrypted magic matches PK\x03\x04 or SCS#, mark as protected
-                bool isZip = (decryptedMagic[0] == 'P' && decryptedMagic[1] == 'K' && decryptedMagic[2] == 0x03 && decryptedMagic[3] == 0x04);
-                bool isScs = (decryptedMagic[0] == 'S' && decryptedMagic[1] == 'C' && decryptedMagic[2] == 'S' && decryptedMagic[3] == '#');
-
-                if (isZip || isScs) {
-                    EnterCriticalSection(&g_HandleLock);
-                    g_ProtectedHandles[hFile] = true;
-                    LeaveCriticalSection(&g_HandleLock);
-                }
+                g_OriginalCloseHandle(hCheck);
             }
         }
     }
@@ -224,21 +222,37 @@ BOOL WINAPI HookedReadFile(
 
     BOOL result = g_OriginalReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
 
-    if (result && lpBuffer != NULL && lpNumberOfBytesRead != NULL && *lpNumberOfBytesRead > 0) {
+    // Support synchronous reads, overlapped reads with NULL lpNumberOfBytesRead, and ERROR_IO_PENDING
+    DWORD bytesRead = 0;
+    if (result) {
+        if (lpNumberOfBytesRead != NULL) {
+            bytesRead = *lpNumberOfBytesRead;
+        } else if (lpOverlapped != NULL) {
+            GetOverlappedResult(hFile, lpOverlapped, &bytesRead, FALSE);
+        }
+    } else if (GetLastError() == ERROR_IO_PENDING && lpOverlapped != NULL) {
+        if (GetOverlappedResult(hFile, lpOverlapped, &bytesRead, TRUE)) {
+            result = TRUE;
+            if (lpNumberOfBytesRead) *lpNumberOfBytesRead = bytesRead;
+        }
+    }
+
+    if (result && lpBuffer != NULL && bytesRead > 0) {
         bool isProtected = false;
         EnterCriticalSection(&g_HandleLock);
-        if (g_ProtectedHandles.find(hFile) != g_ProtectedHandles.end()) {
+        auto it = g_ProtectedHandles.find(hFile);
+        if (it != g_ProtectedHandles.end() && it->second) {
             isProtected = true;
         }
         LeaveCriticalSection(&g_HandleLock);
 
         if (isProtected && g_bLeaseValid) {
             unsigned char* buf = reinterpret_cast<unsigned char*>(lpBuffer);
-            DWORD bytesRead = *lpNumberOfBytesRead;
             long long startPos = offsetBefore.QuadPart;
 
             for (DWORD i = 0; i < bytesRead; i++) {
-                buf[i] ^= DRM_CIPHER_KEY[(startPos + i) % sizeof(DRM_CIPHER_KEY)] ^ ((startPos + i) & 0xFF);
+                long long absPos = startPos + i;
+                buf[i] ^= DRM_CIPHER_KEY[absPos % sizeof(DRM_CIPHER_KEY)] ^ (absPos & 0xFF);
             }
         }
     }
@@ -253,59 +267,77 @@ BOOL WINAPI HookedCloseHandle(HANDLE hObject) {
     return g_OriginalCloseHandle(hObject);
 }
 
-void InstallHooks() {
-    HMODULE hExe = GetModuleHandle(NULL);
-    if (!hExe) return;
+void HookModuleIAT(HMODULE hTargetModule) {
+    if (!hTargetModule) return;
 
-    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hExe;
+    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hTargetModule;
     if (pDosHeader->e_magic != IMAGE_DOS_SIGNATURE) return;
 
-    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((PBYTE)hExe + pDosHeader->e_lfanew);
+    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((PBYTE)hTargetModule + pDosHeader->e_lfanew);
     if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE) return;
 
     DWORD importRva = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
     if (!importRva) return;
 
-    PIMAGE_IMPORT_DESCRIPTOR pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)((PBYTE)hExe + importRva);
+    PIMAGE_IMPORT_DESCRIPTOR pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)((PBYTE)hTargetModule + importRva);
 
     for (; pImportDesc->Name; pImportDesc++) {
-        const char* pszModName = (const char*)((PBYTE)hExe + pImportDesc->Name);
-        if (_stricmp(pszModName, "KERNEL32.dll") == 0) {
-            PIMAGE_THUNK_DATA pThunk = (PIMAGE_THUNK_DATA)((PBYTE)hExe + pImportDesc->FirstThunk);
-            PIMAGE_THUNK_DATA pOrigThunk = (PIMAGE_THUNK_DATA)((PBYTE)hExe + pImportDesc->OriginalFirstThunk);
+        const char* pszModName = (const char*)((PBYTE)hTargetModule + pImportDesc->Name);
+        std::string modNameLower = pszModName;
+        std::transform(modNameLower.begin(), modNameLower.end(), modNameLower.begin(), ::tolower);
+
+        if (modNameLower.find("kernel32") != std::string::npos ||
+            modNameLower.find("kernelbase") != std::string::npos ||
+            modNameLower.find("api-ms-win-core-file") != std::string::npos) {
+
+            PIMAGE_THUNK_DATA pThunk = (PIMAGE_THUNK_DATA)((PBYTE)hTargetModule + pImportDesc->FirstThunk);
+            PIMAGE_THUNK_DATA pOrigThunk = (PIMAGE_THUNK_DATA)((PBYTE)hTargetModule + pImportDesc->OriginalFirstThunk);
 
             for (; pThunk->u1.Function; pThunk++, pOrigThunk++) {
                 if (IMAGE_SNAP_BY_ORDINAL(pOrigThunk->u1.Ordinal)) continue;
-                PIMAGE_IMPORT_BY_NAME pImportByName = (PIMAGE_IMPORT_BY_NAME)((PBYTE)hExe + pOrigThunk->u1.AddressOfData);
+                PIMAGE_IMPORT_BY_NAME pImportByName = (PIMAGE_IMPORT_BY_NAME)((PBYTE)hTargetModule + pOrigThunk->u1.AddressOfData);
                 const char* pszFuncName = (const char*)pImportByName->Name;
 
                 DWORD oldProtect;
-                if (strcmp(pszFuncName, "CreateFileW") == 0) {
-                    g_OriginalCreateFileW = (PFN_CreateFileW)pThunk->u1.Function;
+                if (strcmp(pszFuncName, "CreateFileW") == 0 && (PFN_CreateFileW)pThunk->u1.Function != HookedCreateFileW) {
+                    if (!g_OriginalCreateFileW) g_OriginalCreateFileW = (PFN_CreateFileW)pThunk->u1.Function;
                     VirtualProtect(&pThunk->u1.Function, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect);
                     pThunk->u1.Function = (ULONG_PTR)HookedCreateFileW;
                     VirtualProtect(&pThunk->u1.Function, sizeof(LPVOID), oldProtect, &oldProtect);
-                } else if (strcmp(pszFuncName, "ReadFile") == 0) {
-                    g_OriginalReadFile = (PFN_ReadFile)pThunk->u1.Function;
+                } else if (strcmp(pszFuncName, "ReadFile") == 0 && (PFN_ReadFile)pThunk->u1.Function != HookedReadFile) {
+                    if (!g_OriginalReadFile) g_OriginalReadFile = (PFN_ReadFile)pThunk->u1.Function;
                     VirtualProtect(&pThunk->u1.Function, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect);
                     pThunk->u1.Function = (ULONG_PTR)HookedReadFile;
                     VirtualProtect(&pThunk->u1.Function, sizeof(LPVOID), oldProtect, &oldProtect);
-                } else if (strcmp(pszFuncName, "CloseHandle") == 0) {
-                    g_OriginalCloseHandle = (PFN_CloseHandle)pThunk->u1.Function;
+                } else if (strcmp(pszFuncName, "CloseHandle") == 0 && (PFN_CloseHandle)pThunk->u1.Function != HookedCloseHandle) {
+                    if (!g_OriginalCloseHandle) g_OriginalCloseHandle = (PFN_CloseHandle)pThunk->u1.Function;
                     VirtualProtect(&pThunk->u1.Function, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect);
                     pThunk->u1.Function = (ULONG_PTR)HookedCloseHandle;
                     VirtualProtect(&pThunk->u1.Function, sizeof(LPVOID), oldProtect, &oldProtect);
                 }
             }
-            break;
         }
     }
 }
 
+void InstallHooks() {
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    if (hKernel32) {
+        if (!g_OriginalCreateFileW) g_OriginalCreateFileW = (PFN_CreateFileW)GetProcAddress(hKernel32, "CreateFileW");
+        if (!g_OriginalReadFile) g_OriginalReadFile = (PFN_ReadFile)GetProcAddress(hKernel32, "ReadFile");
+        if (!g_OriginalCloseHandle) g_OriginalCloseHandle = (PFN_CloseHandle)GetProcAddress(hKernel32, "CloseHandle");
+    }
+    HookModuleIAT(GetModuleHandle(NULL));
+}
+
+// ---------------------------------------------------------------------------
+// SCS Software Telemetry SDK Entry Points
+// ---------------------------------------------------------------------------
+
 #define SCS_EXPORT extern "C" __declspec(dllexport)
 
 SCS_EXPORT unsigned int scs_telemetry_init(const unsigned int version, const void *const params) {
-    return 0;
+    return 0; // SCS_RESULT_OK
 }
 
 SCS_EXPORT void scs_telemetry_shutdown(void) {}
@@ -322,7 +354,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             MessageBoxA(
                 NULL,
                 "ConvoyGate Security Check:\n\n"
-                "Your 30-day lease key is invalid, missing, or belongs to another machine.\n\n"
+                "Your subscription lease key is missing, expired, or unverified.\n\n"
                 "American Truck Simulator startup blocked.",
                 "ConvoyGate - Access Denied",
                 MB_ICONSTOP | MB_SYSTEMMODAL | MB_TOPMOST

@@ -14,12 +14,6 @@ const SERVER_URL = "https://api.convoygate.com";
 const ADMIN_SESSION_FILE = path.join(app.getPath("userData"), "admin_session.json");
 let adminSessionToken = null;
 
-// DRM Cipher Master Key matching C++ DLL
-const DRM_CIPHER_KEY = Buffer.from([
-  0x43, 0x6F, 0x6E, 0x76, 0x6F, 0x79, 0x47, 0x61,
-  0x74, 0x65, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
-]);
-
 const MEGAPACKS_DIR = path.join(app.getPath("userData"), "megapacks_storage");
 const REGISTRY_FILE = path.join(app.getPath("userData"), "megapacks_registry.json");
 
@@ -40,9 +34,7 @@ function saveRegistry(data) {
 
 function loadAdminSession() {
   try {
-    if (fs.existsSync(ADMIN_SESSION_FILE)) {
-      return JSON.parse(fs.readFileSync(ADMIN_SESSION_FILE, "utf8"));
-    }
+    if (fs.existsSync(ADMIN_SESSION_FILE)) return JSON.parse(fs.readFileSync(ADMIN_SESSION_FILE, "utf8"));
   } catch (e) {}
   return null;
 }
@@ -82,7 +74,6 @@ app.whenReady().then(createWindow);
 ipcMain.handle("get-stored-admin-session", async () => {
   const session = loadAdminSession();
   if (!session || !session.token) return { hasSession: false };
-
   adminSessionToken = session.token;
   return { hasSession: true, user: session.user, token: session.token };
 });
@@ -115,7 +106,6 @@ ipcMain.handle("discord-admin-login", async () => {
         adminSessionToken = urlObj.searchParams.get("token");
         const username = urlObj.searchParams.get("username");
         const sessionData = { token: adminSessionToken, user: { username } };
-
         saveAdminSession(sessionData);
         authWin.close();
         resolve({ success: true, ...sessionData });
@@ -186,7 +176,7 @@ async function extractArchiveToDir(archivePath, targetDir, onProgress) {
         break;
       }
     }
-    if (eocdOffset === -1) throw new Error("Invalid archive: missing EOCD.");
+    if (eocdOffset === -1) throw new Error(`'${path.basename(archivePath)}' is missing a valid ZIP EOCD directory.`);
 
     const cdSize = searchBuf.readUInt32LE(eocdOffset + 12);
     const cdOffset = searchBuf.readUInt32LE(eocdOffset + 16);
@@ -253,7 +243,7 @@ async function extractArchiveToDir(archivePath, targetDir, onProgress) {
   }
 }
 
-// Assemble clean SCS ZIP archives before on-the-fly stream encryption
+// Memory-efficient chunked archiver (handles multi-GB Mega Packs without RAM crashes)
 async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
   const files = getAllFiles(sourceFolder);
   if (files.length === 0) throw new Error("Folder contains no mod assets.");
@@ -261,12 +251,14 @@ async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
   const outFd = fs.openSync(outputPath, "w");
   let currentOffset = 0;
   const centralEntries = [];
+  const CHUNK_SIZE = 1024 * 1024; // 1 MB streaming buffer
+  const chunkBuf = Buffer.alloc(CHUNK_SIZE);
 
   for (let i = 0; i < files.length; i++) {
     const item = files[i];
-    const fileBuf = fs.readFileSync(item.full);
+    const stat = fs.statSync(item.full);
+    const size = stat.size;
     const nameBuf = Buffer.from(item.rel, "utf8");
-    const size = fileBuf.length;
 
     const lfh = Buffer.alloc(30);
     lfh.writeUInt32LE(0x04034b50, 0);
@@ -285,10 +277,17 @@ async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
     currentOffset += lfh.length;
     fs.writeSync(outFd, nameBuf, 0, nameBuf.length, currentOffset);
     currentOffset += nameBuf.length;
-    fs.writeSync(outFd, fileBuf, 0, fileBuf.length, currentOffset);
 
     const localHeaderOffset = currentOffset - lfh.length - nameBuf.length;
-    currentOffset += fileBuf.length;
+
+    // Stream file data in 1MB chunks to keep memory usage flat
+    const inFd = fs.openSync(item.full, "r");
+    let bytesRead = 0;
+    while ((bytesRead = fs.readSync(inFd, chunkBuf, 0, CHUNK_SIZE, null)) > 0) {
+      fs.writeSync(outFd, chunkBuf, 0, bytesRead, currentOffset);
+      currentOffset += bytesRead;
+    }
+    fs.closeSync(inFd);
 
     const cd = Buffer.alloc(46);
     cd.writeUInt32LE(0x02014b50, 0);
@@ -311,7 +310,7 @@ async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
 
     centralEntries.push({ cd, nameBuf });
 
-    if (i % 25 === 0) {
+    if (i % 20 === 0) {
       if (onProgress) onProgress(`Archiving: ${i + 1}/${files.length} assets...`, Math.round((i / files.length) * 40));
       await yieldEventLoop();
     }
@@ -343,8 +342,7 @@ async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
   fs.closeSync(outFd);
 }
 
-// Full-file absolute-offset stream encryption matching convoygate.dll
-function streamEncryptedUploadToBackend(filePath, headers, onProgress) {
+function streamUploadToBackend(filePath, headers, onProgress) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${SERVER_URL}/api/v1/admin/upload-stream`);
     const stat = fs.statSync(filePath);
@@ -379,7 +377,7 @@ function streamEncryptedUploadToBackend(filePath, headers, onProgress) {
           ...authHeaders,
           ...headers,
         },
-        timeout: 1800000,
+        timeout: 3600000, // 1 hour for multi-gigabyte packs
       },
       (res) => {
         let responseBody = "";
@@ -400,7 +398,7 @@ function streamEncryptedUploadToBackend(filePath, headers, onProgress) {
 
     req.on("timeout", () => {
       cleanup();
-      req.destroy(new Error("Upload request timed out after 30 minutes"));
+      req.destroy(new Error("Upload request timed out after 60 minutes"));
     });
 
     req.on("error", (err) => {
@@ -412,19 +410,15 @@ function streamEncryptedUploadToBackend(filePath, headers, onProgress) {
     });
 
     let bytesSent = 0;
-    const encryptTransform = new Transform({
+    const progressTransform = new Transform({
       transform(chunk, encoding, callback) {
-        for (let i = 0; i < chunk.length; i++) {
-          const absPos = bytesSent + i;
-          chunk[i] ^= DRM_CIPHER_KEY[absPos % 16] ^ (absPos & 0xFF);
-        }
         bytesSent += chunk.length;
         if (onProgress) onProgress(bytesSent, stat.size);
         callback(null, chunk);
       },
     });
 
-    pipeline(fileStream, encryptTransform, req).catch((err) => {
+    pipeline(fileStream, progressTransform, req).catch((err) => {
       cleanup();
       if (!settled) {
         settled = true;
@@ -441,7 +435,7 @@ function updateMegaPackManifest(targetDir, megaPackName, version, includedFiles)
   const fileListText = includedFiles.map(f => `- ${f}`).join("\n");
   const descContent = `Mega Pack: ${megaPackName}\n` +
     `Version: ${version}\n` +
-    `Protected by ConvoyGate Fleet Engine\n\n` +
+    `Distributed via ConvoyGate\n\n` +
     `Included Packages:\n${fileListText}\n`;
 
   fs.writeFileSync(descPath, descContent, "utf8");
@@ -526,8 +520,8 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         fileToUpload = tmpFinalScs;
       }
 
-      sendStatus("Encrypting stream & uploading to Sydney VPS...", 40);
-      const result = await streamEncryptedUploadToBackend(
+      sendStatus("Streaming package to Sydney VPS...", 40);
+      const result = await streamUploadToBackend(
         fileToUpload,
         {
           "x-mod-id": encodeURIComponent(modId),
@@ -537,7 +531,7 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         },
         (sent, total) => {
           const pct = Math.round((sent / total) * 100);
-          sendStatus(`Encrypting & Uploading: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
+          sendStatus(`Uploading: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
         }
       );
 
@@ -614,8 +608,8 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         sendStatus(msg, 55 + Math.round((pct / 100) * 25));
       });
 
-      sendStatus("Encrypting stream & uploading Mega Pack to Sydney VPS...", 80);
-      const result = await streamEncryptedUploadToBackend(
+      sendStatus("Streaming Mega Pack to Sydney VPS...", 80);
+      const result = await streamUploadToBackend(
         tmpFinalScs,
         {
           "x-mod-id": encodeURIComponent(megaPackId),
@@ -625,7 +619,7 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         },
         (sent, total) => {
           const pct = Math.round((sent / total) * 100);
-          sendStatus(`Encrypting & Uploading Mega Pack: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
+          sendStatus(`Uploading Mega Pack: ${pct}% (${(sent / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`, pct);
         }
       );
 
@@ -705,8 +699,8 @@ ipcMain.handle("remove-megapack-item", async (event, { megaPackId, fileName }) =
     sendStatus("Packaging updated Mega Pack...", 65);
     await packFolderToSCS(assembledDir, tmpFinalScs);
 
-    sendStatus("Encrypting & syncing updated Mega Pack to Sydney VPS...", 85);
-    const result = await streamEncryptedUploadToBackend(
+    sendStatus("Syncing updated Mega Pack to Sydney VPS...", 85);
+    const result = await streamUploadToBackend(
       tmpFinalScs,
       {
         "x-mod-id": encodeURIComponent(megaPackId),
