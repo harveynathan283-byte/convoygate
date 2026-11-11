@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "ConvoyGate ATS & ETS2 Mod Sync & Decryption Engine",
   "main": "src/main.js",
+  "author": "ConvoyGate",
   "scripts": {
     "start": "electron .",
     "build:win": "electron-builder --win --x64"
@@ -26,7 +27,6 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToRun": true,
       "allowElevation": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
