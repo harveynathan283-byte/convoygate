@@ -554,7 +554,6 @@
 </head>
 <body>
 
-  <!-- Fullscreen Admin Discord Auth Overlay -->
   <div class="login-overlay" id="adminLoginOverlay">
     <div class="login-modal">
       <div class="login-icon">👑</div>
@@ -593,11 +592,11 @@
         <button class="btn" onclick="browseFolder()">📁 Browse Folder</button>
         <button class="btn" onclick="browseSingleFile()">📦 Browse Single .SCS / .ZIP</button>
         <button class="btn btn-purple" onclick="browseMultipleFiles()">📚 Browse Multiple Files</button>
+        <button class="btn" style="border-color: #334155;" onclick="clearMegaPackCache()">🧹 Clean Staged Cache</button>
       </div>
       <button class="btn btn-primary" onclick="loadCatalog()">🔄 Refresh Catalog</button>
     </div>
 
-    <!-- Live Uploading Progress Card -->
     <div class="upload-progress-card" id="uploadProgressCard">
       <div class="upload-progress-header">
         <div class="upload-status-title" id="uploadStatusText">Preparing package...</div>
@@ -634,7 +633,6 @@
     </section>
   </div>
 
-  <!-- Adaptive Publish Modal -->
   <div class="modal-overlay" id="publishModal">
     <div class="modal-card">
       <div class="modal-header">
@@ -699,7 +697,6 @@
     </div>
   </div>
 
-  <!-- Mega Pack Sub-Mod Inspector & Remover Modal -->
   <div class="modal-overlay" id="megaPackManageModal">
     <div class="modal-card">
       <div class="modal-header">
@@ -793,6 +790,15 @@
       btnAdminDiscordLogin.innerText = "Log In with Admin Discord";
       btnAdminDiscordLogin.style.opacity = "1";
       btnAdminDiscordLogin.style.pointerEvents = "auto";
+    }
+
+    async function clearMegaPackCache() {
+      if (!confirm("Clean staged cache? This removes all locally cached Mega Pack working files and resets the list.")) return;
+      const res = await ipcRenderer.invoke("clean-megapack-cache");
+      if (res && res.success) {
+        showAlert("Mega Pack staging cache cleaned successfully.", "success");
+        await loadCatalog();
+      }
     }
 
     dropZone.addEventListener("dragover", (e) => {
@@ -946,7 +952,7 @@
     }
 
     function showAlert(msg, type) {
-      alertBanner.style.display = "block"; // Explicitly clear any inline display:none
+      alertBanner.style.display = "block";
       alertBanner.className = `alert-banner ${type}`;
       alertBanner.innerText = msg;
     }
@@ -1036,9 +1042,11 @@
           closeModal();
           showUploadCard(`Starting batch upload (0/${itemsToUpload.length})...`);
 
+          const failedItems = [];
+
           for (let i = 0; i < itemsToUpload.length; i++) {
             const item = itemsToUpload[i];
-            updateUploadCard(`[${i + 1}/${itemsToUpload.length}] Packaging & uploading ${item.name}...`, 0);
+            updateUploadCard(`[${i + 1}/${itemsToUpload.length}] Processing & uploading ${item.name}...`, 0);
 
             const res = await ipcRenderer.invoke("publish-package-adaptive", {
               isMegaPack: false,
@@ -1050,19 +1058,25 @@
             });
 
             if (!res || !res.success) {
-              uploadProgressBar.style.background = "#ef4444";
-              const errStr = res && res.error ? res.error : "Upload failed.";
-              updateUploadCard(`Failed on ${item.name}: ${errStr}`, 100);
-              showAlert(`Failed on [${i + 1}/${itemsToUpload.length}] ${item.name}: ${errStr}`, "error");
-              await loadCatalog();
-              return;
+              failedItems.push({ name: item.name, error: res?.error || "Connection dropped" });
             }
+
+            // Breather pause between files so VPS socket recycling and disk flush complete cleanly
+            await new Promise(r => setTimeout(r, 750));
           }
 
-          updateUploadCard(`All ${itemsToUpload.length} mods successfully published!`, 100);
-          uploadProgressBar.style.background = "#10b981";
-          setTimeout(hideUploadCard, 4000);
-          showAlert(`All ${itemsToUpload.length} batch mods published successfully!`, "success");
+          if (failedItems.length === 0) {
+            updateUploadCard(`All ${itemsToUpload.length} mods successfully published!`, 100);
+            uploadProgressBar.style.background = "#10b981";
+            setTimeout(hideUploadCard, 4000);
+            showAlert(`All ${itemsToUpload.length} batch mods published successfully!`, "success");
+          } else {
+            uploadProgressBar.style.background = "#f59e0b";
+            const failNames = failedItems.map(f => f.name).join(", ");
+            updateUploadCard(`Completed: ${itemsToUpload.length - failedItems.length}/${itemsToUpload.length} uploaded.`, 100);
+            showAlert(`Uploaded ${itemsToUpload.length - failedItems.length}/${itemsToUpload.length} mods. Failed: ${failNames}`, "error");
+          }
+
           await loadCatalog();
         }
 

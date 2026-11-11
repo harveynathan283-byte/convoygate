@@ -243,7 +243,6 @@ async function extractArchiveToDir(archivePath, targetDir, onProgress) {
   }
 }
 
-// Memory-efficient chunked archiver (handles multi-GB Mega Packs without RAM crashes)
 async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
   const files = getAllFiles(sourceFolder);
   if (files.length === 0) throw new Error("Folder contains no mod assets.");
@@ -251,7 +250,7 @@ async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
   const outFd = fs.openSync(outputPath, "w");
   let currentOffset = 0;
   const centralEntries = [];
-  const CHUNK_SIZE = 1024 * 1024; // 1 MB streaming buffer
+  const CHUNK_SIZE = 1024 * 1024;
   const chunkBuf = Buffer.alloc(CHUNK_SIZE);
 
   for (let i = 0; i < files.length; i++) {
@@ -280,7 +279,6 @@ async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
 
     const localHeaderOffset = currentOffset - lfh.length - nameBuf.length;
 
-    // Stream file data in 1MB chunks to keep memory usage flat
     const inFd = fs.openSync(item.full, "r");
     let bytesRead = 0;
     while ((bytesRead = fs.readSync(inFd, chunkBuf, 0, CHUNK_SIZE, null)) > 0) {
@@ -342,11 +340,16 @@ async function packFolderToSCS(sourceFolder, outputPath, onProgress) {
   fs.closeSync(outFd);
 }
 
-function streamUploadToBackend(filePath, headers, onProgress) {
+// Single-attempt stream upload with dedicated socket & response capture
+function performSingleStreamUpload(filePath, headers, onProgress) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${SERVER_URL}/api/v1/admin/upload-stream`);
     const stat = fs.statSync(filePath);
-    const client = url.protocol === "https:" ? https : http;
+    const isHttps = url.protocol === "https:";
+    const client = isHttps ? https : http;
+
+    // Dedicated agent with keepAlive: false prevents recycled socket drops
+    const agent = new client.Agent({ keepAlive: false });
 
     const authHeaders = {};
     if (adminSessionToken) {
@@ -355,58 +358,68 @@ function streamUploadToBackend(filePath, headers, onProgress) {
       authHeaders["x-admin-key"] = "cg_admin_local_fallback";
     }
 
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
     let settled = false;
+    let serverRes = null;
+    let responseBody = "";
 
-    const cleanup = () => {
-      if (fileStream && !fileStream.destroyed) {
-        try { fileStream.destroy(); } catch (e) {}
-      }
+    const finish = (result, isError = false) => {
+      if (settled) return;
+      settled = true;
+      try { fileStream.destroy(); } catch (_) {}
+      if (isError) reject(result);
+      else resolve(result);
     };
 
     const req = client.request(
       {
         protocol: url.protocol,
         hostname: url.hostname,
-        port: url.port ? url.port : (url.protocol === "https:" ? 443 : 80),
+        port: url.port ? url.port : (isHttps ? 443 : 80),
         path: url.pathname + url.search,
         method: "POST",
+        agent,
         headers: {
+          "Connection": "close",
           "Content-Type": "application/octet-stream",
           "Content-Length": stat.size,
           ...authHeaders,
           ...headers,
         },
-        timeout: 3600000, // 1 hour for multi-gigabyte packs
+        timeout: 3600000,
       },
       (res) => {
-        let responseBody = "";
+        serverRes = res;
         res.on("data", (chunk) => (responseBody += chunk));
         res.on("end", () => {
-          cleanup();
-          if (!settled) {
-            settled = true;
-            try {
-              resolve(JSON.parse(responseBody));
-            } catch {
-              resolve({ success: res.statusCode >= 200 && res.statusCode < 300, data: responseBody });
-            }
+          let parsed = null;
+          try { parsed = JSON.parse(responseBody); } catch (_) {}
+          if (parsed) {
+            finish(parsed);
+          } else if (res.statusCode >= 200 && res.statusCode < 300) {
+            finish({ success: true, data: responseBody });
+          } else {
+            finish(new Error(`Server returned HTTP ${res.statusCode}: ${responseBody || res.statusMessage}`), true);
           }
         });
       }
     );
 
     req.on("timeout", () => {
-      cleanup();
-      req.destroy(new Error("Upload request timed out after 60 minutes"));
+      req.destroy();
+      finish(new Error("Upload request timed out after 60 minutes"), true);
     });
 
     req.on("error", (err) => {
-      cleanup();
-      if (!settled) {
-        settled = true;
-        reject(err);
-      }
+      setTimeout(() => {
+        if (!settled) {
+          if (serverRes) {
+            finish(new Error(`Server closed (${serverRes.statusCode}): ${responseBody || err.message}`), true);
+          } else {
+            finish(err, true);
+          }
+        }
+      }, 500);
     });
 
     let bytesSent = 0;
@@ -419,13 +432,49 @@ function streamUploadToBackend(filePath, headers, onProgress) {
     });
 
     pipeline(fileStream, progressTransform, req).catch((err) => {
-      cleanup();
-      if (!settled) {
-        settled = true;
-        reject(err);
-      }
+      // If server sent an early response (e.g. 413 Payload Too Large) and dropped socket,
+      // allow res.on('end') a chance to resolve with the server's error message
+      setTimeout(() => {
+        if (!settled) {
+          if (serverRes) {
+            finish(new Error(`Server error (${serverRes.statusCode}): ${responseBody || err.message}`), true);
+          } else {
+            finish(err, true);
+          }
+        }
+      }, 500);
     });
   });
+}
+
+// Automatic retry with backoff for network drops / premature close
+async function streamUploadWithRetry(filePath, headers, onProgress, maxAttempts = 3) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (attempt > 1 && onProgress) {
+        onProgress(0, 100);
+      }
+      const result = await performSingleStreamUpload(filePath, headers, onProgress);
+      if (result && result.success) return result;
+      if (result && result.error && !result.error.includes("Premature close") && !result.error.includes("ECONNRESET")) {
+        return result;
+      }
+      lastErr = new Error(result?.error || "Upload rejected");
+    } catch (err) {
+      lastErr = err;
+      const isRetryable = err.message.includes("Premature close") ||
+                          err.message.includes("ECONNRESET") ||
+                          err.message.includes("ETIMEDOUT") ||
+                          err.message.includes("EPIPE");
+      if (!isRetryable || attempt === maxAttempts) {
+        throw err;
+      }
+    }
+    // Pause before retrying
+    await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+  }
+  throw lastErr;
 }
 
 function updateMegaPackManifest(targetDir, megaPackName, version, includedFiles) {
@@ -458,6 +507,17 @@ mod_package : .package_info {
 }
 
 ipcMain.handle("get-megapacks", () => loadRegistry());
+
+ipcMain.handle("clean-megapack-cache", () => {
+  try {
+    fs.rmSync(MEGAPACKS_DIR, { recursive: true, force: true });
+    fs.mkdirSync(MEGAPACKS_DIR, { recursive: true });
+    saveRegistry([]);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
 
 ipcMain.handle("browse-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -501,6 +561,24 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
       return { success: false, error: "No files provided." };
     }
 
+    if (isMegaPack) {
+      for (const itemPath of filePaths) {
+        const stat = fs.statSync(itemPath);
+        if (stat.isFile()) {
+          const fd = fs.openSync(itemPath, "r");
+          const magicBuf = Buffer.alloc(4);
+          fs.readSync(fd, magicBuf, 0, 4, 0);
+          fs.closeSync(fd);
+          if (magicBuf.toString("ascii") === "SCS#") {
+            return {
+              success: false,
+              error: `'${path.basename(itemPath)}' is an SCS HashFS container and cannot be extracted into a Mega Pack. Publish it as a Single Mod.`
+            };
+          }
+        }
+      }
+    }
+
     const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
     if (!isMegaPack) {
@@ -520,8 +598,8 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         fileToUpload = tmpFinalScs;
       }
 
-      sendStatus("Streaming package to Sydney VPS...", 40);
-      const result = await streamUploadToBackend(
+      sendStatus("Streaming package to Sydney VPS...", 30);
+      const result = await streamUploadWithRetry(
         fileToUpload,
         {
           "x-mod-id": encodeURIComponent(modId),
@@ -583,20 +661,36 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
       fs.rmSync(assembledDir, { recursive: true, force: true });
       fs.mkdirSync(assembledDir, { recursive: true });
 
+      const validFiles = [];
       for (let i = 0; i < packEntry.files.length; i++) {
         const fileName = packEntry.files[i];
         const srcPath = path.join(sourcesDir, fileName);
         if (!fs.existsSync(srcPath)) continue;
 
-        sendStatus(`Merging truck assets: ${fileName}...`, 20 + Math.round((i / packEntry.files.length) * 25));
         const stat = fs.statSync(srcPath);
+        if (stat.isFile()) {
+          const testFd = fs.openSync(srcPath, "r");
+          const testBuf = Buffer.alloc(4);
+          fs.readSync(testFd, testBuf, 0, 4, 0);
+          fs.closeSync(testFd);
+          if (testBuf.toString("ascii") === "SCS#") {
+            try { fs.rmSync(srcPath, { force: true }); } catch (e) {}
+            continue;
+          }
+        }
+
+        sendStatus(`Merging truck assets: ${fileName}...`, 20 + Math.round((i / packEntry.files.length) * 25));
         if (stat.isDirectory()) {
           await copyFolderRecursive(srcPath, assembledDir);
         } else {
           await extractArchiveToDir(srcPath, assembledDir);
         }
+        validFiles.push(fileName);
         await yieldEventLoop();
       }
+
+      packEntry.files = validFiles;
+      saveRegistry(registry);
 
       sendStatus("Generating master Mega Pack dealer manifest...", 50);
       updateMegaPackManifest(assembledDir, megaPackName, version, packEntry.files);
@@ -608,8 +702,8 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         sendStatus(msg, 55 + Math.round((pct / 100) * 25));
       });
 
-      sendStatus("Streaming Mega Pack to Sydney VPS...", 80);
-      const result = await streamUploadToBackend(
+      sendStatus("Streaming Mega Pack to Sydney VPS...", 75);
+      const result = await streamUploadWithRetry(
         tmpFinalScs,
         {
           "x-mod-id": encodeURIComponent(megaPackId),
@@ -699,8 +793,8 @@ ipcMain.handle("remove-megapack-item", async (event, { megaPackId, fileName }) =
     sendStatus("Packaging updated Mega Pack...", 65);
     await packFolderToSCS(assembledDir, tmpFinalScs);
 
-    sendStatus("Syncing updated Mega Pack to Sydney VPS...", 85);
-    const result = await streamUploadToBackend(
+    sendStatus("Syncing updated Mega Pack to Sydney VPS...", 80);
+    const result = await streamUploadWithRetry(
       tmpFinalScs,
       {
         "x-mod-id": encodeURIComponent(megaPackId),
@@ -728,6 +822,23 @@ ipcMain.handle("remove-megapack-item", async (event, { megaPackId, fileName }) =
 ipcMain.handle("fetch-catalog", async () => {
   try {
     const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 6000 });
+    if (res.data && res.data.success && Array.isArray(res.data.mods)) {
+      const cloudIds = new Set(res.data.mods.map(m => m.id));
+      const localRegistry = loadRegistry();
+      const updatedRegistry = [];
+
+      for (const pack of localRegistry) {
+        if (cloudIds.has(pack.id)) {
+          updatedRegistry.push(pack);
+        } else {
+          const packBaseDir = path.join(MEGAPACKS_DIR, pack.id);
+          if (fs.existsSync(packBaseDir)) {
+            try { fs.rmSync(packBaseDir, { recursive: true, force: true }); } catch (e) {}
+          }
+        }
+      }
+      saveRegistry(updatedRegistry);
+    }
     return res.data;
   } catch (err) {
     return { success: false, error: err.message };
