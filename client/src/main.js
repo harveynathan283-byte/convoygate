@@ -12,7 +12,7 @@ let syncInterval = null;
 let watchdogInterval = null;
 let isSyncing = false;
 
-const PLUGIN_FILENAME = "convoygate_plugin.dll";
+const PLUGIN_NAME = "convoygate.dll";
 const SERVER_URL = "https://api.convoygate.com";
 const SESSION_FILE = path.join(app.getPath("userData"), "session.json");
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
@@ -49,18 +49,17 @@ function autoDetectGameDir() {
   return "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins";
 }
 
-function locateLocalPlugin() {
-  const candidates = [
-    path.join(process.resourcesPath, "..", PLUGIN_FILENAME),
-    path.join(process.resourcesPath, PLUGIN_FILENAME),
-    path.join(__dirname, "..", PLUGIN_FILENAME),
-    path.join(__dirname, PLUGIN_FILENAME),
-    path.join(__dirname, "../../plugin", PLUGIN_FILENAME),
-    path.join(__dirname, "../../plugin/build/Release", PLUGIN_FILENAME),
-    path.join(__dirname, "../../plugin/Release", PLUGIN_FILENAME)
+function locateSourcePlugin() {
+  const searchLocations = [
+    path.join(process.resourcesPath, "..", PLUGIN_NAME),
+    path.join(process.resourcesPath, PLUGIN_NAME),
+    path.join(__dirname, "..", PLUGIN_NAME),
+    path.join(__dirname, PLUGIN_NAME),
+    path.join(__dirname, "../../plugin/build/Release", PLUGIN_NAME),
+    path.join(__dirname, "../../plugin", PLUGIN_NAME)
   ];
 
-  for (const loc of candidates) {
+  for (const loc of searchLocations) {
     try {
       if (fs.existsSync(loc)) return loc;
     } catch (_) {}
@@ -69,29 +68,24 @@ function locateLocalPlugin() {
 }
 
 function silentlyInjectPlugin() {
-  const targetPlugin = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  const targetPlugin = path.join(userSettings.gameDir, PLUGIN_NAME);
   if (fs.existsSync(targetPlugin)) return { success: true, path: targetPlugin };
 
   if (!fs.existsSync(userSettings.gameDir)) {
     try { fs.mkdirSync(userSettings.gameDir, { recursive: true }); } catch (_) {}
   }
 
-  const localSrc = locateLocalPlugin();
-  if (localSrc && fs.existsSync(localSrc)) {
+  const src = locateSourcePlugin();
+  if (src && fs.existsSync(src)) {
     try {
-      fs.copyFileSync(localSrc, targetPlugin);
-      if (fs.existsSync(targetPlugin)) {
-        return { success: true, path: targetPlugin };
-      }
-    } catch (err) {
-      return { success: false, error: err.message };
+      fs.copyFileSync(src, targetPlugin);
+      return { success: fs.existsSync(targetPlugin), path: targetPlugin };
+    } catch (e) {
+      return { success: false, error: e.message };
     }
   }
 
-  return {
-    success: false,
-    error: "convoygate_plugin.dll not found in application files. Run the latest ConvoyGate Setup installer."
-  };
+  return { success: false, error: "convoygate.dll not found in installation directory." };
 }
 
 let userSettings = {
@@ -231,11 +225,11 @@ async function auditSubscriberStatusAndEnforce() {
   const session = loadSession();
   silentlyInjectPlugin();
 
-  const pluginFile = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  const pluginFile = path.join(userSettings.gameDir, PLUGIN_NAME);
   const trackedMods = loadManagedMods();
 
   if (trackedMods.length > 0 && !fs.existsSync(pluginFile)) {
-    purgeAllManagedMods("convoygate_plugin.dll missing from game plugins directory. All managed mods removed.");
+    purgeAllManagedMods("convoygate.dll missing from game plugins directory. All managed mods removed.");
     return false;
   }
 
@@ -557,7 +551,7 @@ ipcMain.handle("update-settings", (event, newSettings) => {
 });
 
 ipcMain.handle("audit-plugin", () => {
-  const pluginFile = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  const pluginFile = path.join(userSettings.gameDir, PLUGIN_NAME);
   const exists = fs.existsSync(pluginFile);
   return { valid: exists, path: pluginFile, gameDir: userSettings.gameDir };
 });
