@@ -15,7 +15,14 @@
       "output": "dist"
     },
     "extraFiles": [
-      "convoygate.dll"
+      {
+        "from": ".",
+        "to": ".",
+        "filter": [
+          "convoygate.dll",
+          "convoygate_plugin.dll"
+        ]
+      }
     ],
     "win": {
       "target": "nsis"
