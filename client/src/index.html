@@ -30,7 +30,6 @@
       padding: 0;
     }
 
-    /* Scrollbars */
     ::-webkit-scrollbar {
       width: 8px;
       height: 8px;
@@ -56,7 +55,6 @@
       user-select: none;
     }
 
-    /* --- Discord Auth Intercept Overlay --- */
     .login-overlay {
       position: fixed;
       top: 0;
@@ -140,7 +138,6 @@
       font-weight: 600;
     }
 
-    /* --- Sidebar Navigation --- */
     .sidebar {
       width: 250px;
       background: var(--bg-sidebar);
@@ -257,7 +254,6 @@
       font-family: monospace;
     }
 
-    /* --- Main Workspace --- */
     .workspace {
       flex: 1;
       display: flex;
@@ -357,7 +353,6 @@
       background: rgba(239, 68, 68, 0.3);
     }
 
-    /* --- View Containers with Independent Scrolling --- */
     .view-content {
       flex: 1;
       display: none;
@@ -369,7 +364,6 @@
       display: flex;
     }
 
-    /* --- Dual Column Layout (Mod Catalog) --- */
     .catalog-view {
       display: flex;
       width: 100%;
@@ -494,7 +488,6 @@
       border: 1px solid rgba(148, 163, 184, 0.2);
     }
 
-    /* --- Mod Detail Inspector (Scrollable) --- */
     .mod-detail-pane {
       flex: 1;
       overflow-y: auto;
@@ -622,7 +615,6 @@
       color: #e2e8f0;
     }
 
-    /* --- Settings & Directories View (Scrollable) --- */
     .settings-pane {
       width: 100%;
       max-width: 740px;
@@ -744,7 +736,6 @@
       transform: translateX(20px);
     }
 
-    /* --- Universal Progress Bar Footer --- */
     .progress-footer {
       height: 52px;
       background: var(--bg-sidebar);
@@ -785,7 +776,6 @@
 </head>
 <body>
 
-  <!-- Fullscreen Discord Login Intercept Modal -->
   <div class="login-overlay" id="loginOverlay">
     <div class="login-modal">
       <div class="login-icon">🛡️</div>
@@ -801,7 +791,6 @@
     </div>
   </div>
 
-  <!-- Left Sidebar -->
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-icon">🛡️</div>
@@ -835,10 +824,7 @@
     </div>
   </aside>
 
-  <!-- Main Content Space -->
   <main class="workspace">
-
-    <!-- Top Navigation Header -->
     <header class="top-bar">
       <div class="title-group">
         <h1 id="topBarTitle">Mod Catalog & Installer</h1>
@@ -855,11 +841,8 @@
       </div>
     </header>
 
-    <!-- VIEW 1: Mod Catalog & Dual Pane Installer -->
     <section class="view-content active" id="viewCatalog">
       <div class="catalog-view">
-        
-        <!-- Left Product Column -->
         <div class="catalog-sidebar">
           <div class="catalog-filters">
             <input type="text" id="searchBox" placeholder="Search mods by name..." oninput="filterMods()">
@@ -867,7 +850,6 @@
           <div class="mod-list" id="modCardsContainer"></div>
         </div>
 
-        <!-- Right Product Detail Pane -->
         <div class="mod-detail-pane" id="detailPane">
           <div class="hero-banner">
             <img id="heroImage" class="hero-banner-img" src="" alt="Hero preview">
@@ -881,7 +863,6 @@
             </div>
           </div>
 
-          <!-- Single Mod Rich Description Box -->
           <div class="single-mod-description-box" id="singleModDescriptionBox">
             <h4>Mod Description</h4>
             <div class="single-mod-description-text" id="singleModDescriptionText"></div>
@@ -895,16 +876,14 @@
             <div id="fileTableRows"></div>
           </div>
         </div>
-
       </div>
     </section>
 
-    <!-- VIEW 2: Plugin Health & Telemetry Verification -->
     <section class="view-content" id="viewPlugin">
       <div class="settings-pane">
         <div class="settings-card">
           <h3>SCS Telemetry & Anti-Tamper Hook</h3>
-          <p>ConvoyGate requires <code>convoygate.dll</code> in your ATS x64 plugins folder to mount encrypted mods.</p>
+          <p>ConvoyGate requires <code>convoygate_plugin.dll</code> in your ATS x64 plugins folder to mount encrypted mods.</p>
 
           <div class="toggle-row">
             <div class="toggle-info">
@@ -917,10 +896,8 @@
       </div>
     </section>
 
-    <!-- VIEW 3: Settings & Custom Directories -->
     <section class="view-content" id="viewSettings">
       <div class="settings-pane">
-        
         <div class="settings-card">
           <h3>Mod File Directory</h3>
           <p>Location where your <code>.scs</code> mods are placed for ATS to detect them.</p>
@@ -932,7 +909,7 @@
 
         <div class="settings-card">
           <h3>ATS Binaries (Plugins) Directory</h3>
-          <p>Location of <code>American Truck Simulator\bin\win_x64\plugins</code> where <code>convoygate.dll</code> and <code>convoygate.key</code> reside.</p>
+          <p>Location of <code>American Truck Simulator\bin\win_x64\plugins</code> where <code>convoygate_plugin.dll</code> and <code>convoygate.key</code> reside.</p>
           <div class="dir-input-group">
             <input type="text" id="inputGameDir" readonly>
             <button class="btn btn-secondary" onclick="browseDirectory('game')">Change...</button>
@@ -988,7 +965,6 @@
           </div>
         </div>
 
-        <!-- Maintenance / Clean Uninstall Card -->
         <div class="settings-card" style="border-color: rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.04);">
           <h3 style="color: var(--danger);">Game Mod Maintenance</h3>
           <p>Purge all ConvoyGate mod packages from your ATS mod directory.</p>
@@ -1005,18 +981,15 @@
         <div style="display: flex; justify-content: flex-end; padding-bottom: 20px;">
           <button class="btn btn-secondary" onclick="logoutDiscord()">🚪 Log Out of Discord</button>
         </div>
-
       </div>
     </section>
 
-    <!-- Global Progress Bar Footer -->
     <footer class="progress-footer">
       <div class="progress-text" id="footerProgressText">Ready</div>
       <div class="bar-bg">
         <div class="bar-fill" id="footerProgressBar"></div>
       </div>
     </footer>
-
   </main>
 
   <script>
@@ -1045,7 +1018,6 @@
 
       try {
         const res = await ipcRenderer.invoke("discord-login");
-
         if (res && res.success) {
           document.getElementById("loginOverlay").style.display = "none";
           document.getElementById("discordTag").innerText = res.user.username;
@@ -1132,7 +1104,7 @@
       setFooter("Verifying ATS anti-tamper plugin hook...", 10);
       const pluginAudit = await ipcRenderer.invoke("audit-plugin");
       if (!pluginAudit.valid) {
-        setFooter("Injecting convoygate.dll into plugins folder...", 30);
+        setFooter("Injecting convoygate_plugin.dll into plugins folder...", 30);
         await ipcRenderer.invoke("reinstall-plugin");
       }
 
@@ -1306,7 +1278,7 @@
       setFooter("Purging all installed ConvoyGate mods...", 30);
       const res = await ipcRenderer.invoke("uninstall-all-mods");
       if (res && res.success) {
-        setFooter(`Successfully uninstalled ${res.removedCount} mod packages!`, 100);
+        setFooter("Successfully uninstalled mod packages!", 100);
         await loadCatalog();
       } else {
         setFooter(`Uninstall failed: ${res ? res.error : "Unknown error"}`, 0);
@@ -1341,18 +1313,20 @@
       if (status.valid) {
         text.innerHTML = `<span style="color: var(--success);">● Active & Hook Ready</span> (${status.path})`;
       } else {
-        text.innerHTML = `<span style="color: var(--danger);">● Missing or Needs Re-injection</span>`;
+        text.innerHTML = `<span style="color: var(--danger);">● Missing: ${status.path}</span>`;
       }
     }
 
     async function reinstallPlugin() {
-      setFooter("Copying fresh convoygate.dll to game directory...", 40);
+      setFooter("Verifying & injecting convoygate_plugin.dll...", 40);
       const res = await ipcRenderer.invoke("reinstall-plugin");
-      if (res.success) {
-        setFooter("Plugin re-injected successfully!", 100);
+      if (res && res.success) {
+        setFooter("Plugin injected successfully!", 100);
         auditPlugin();
       } else {
-        setFooter(`Plugin install failed: ${res.error}`, 0);
+        const errorMsg = res && res.error ? res.error : "Plugin injection failed";
+        setFooter(`Plugin install failed: ${errorMsg}`, 0);
+        auditPlugin();
       }
     }
 
@@ -1361,7 +1335,6 @@
       document.getElementById("footerProgressBar").style.width = percent + "%";
     }
 
-    // Active live listeners for automatic background updates and downloads
     ipcRenderer.on("queue-progress", (event, data) => {
       setFooter(data.message, data.percent);
     });

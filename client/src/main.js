@@ -49,24 +49,18 @@ function autoDetectGameDir() {
   return "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins";
 }
 
-// Scans project and installed paths for convoygate_plugin.dll
-function locateCompiledPlugin() {
-  const searchLocations = [
-    // Installed application paths ($INSTDIR)
+function locateLocalPlugin() {
+  const candidates = [
     path.join(process.resourcesPath, "..", PLUGIN_FILENAME),
-    path.join(process.resourcesPath, "..", "build", "Release", PLUGIN_FILENAME),
-    path.join(process.resourcesPath, "..", "Release", PLUGIN_FILENAME),
     path.join(process.resourcesPath, PLUGIN_FILENAME),
-    // Local development workspace paths (relative to client/src/)
+    path.join(__dirname, "..", PLUGIN_FILENAME),
+    path.join(__dirname, PLUGIN_FILENAME),
     path.join(__dirname, "../../plugin", PLUGIN_FILENAME),
     path.join(__dirname, "../../plugin/build/Release", PLUGIN_FILENAME),
-    path.join(__dirname, "../../plugin/build", PLUGIN_FILENAME),
-    path.join(__dirname, "../../plugin/Release", PLUGIN_FILENAME),
-    path.join(__dirname, "../../plugin/bin", PLUGIN_FILENAME),
-    path.join(__dirname, "../", PLUGIN_FILENAME)
+    path.join(__dirname, "../../plugin/Release", PLUGIN_FILENAME)
   ];
 
-  for (const loc of searchLocations) {
+  for (const loc of candidates) {
     try {
       if (fs.existsSync(loc)) return loc;
     } catch (_) {}
@@ -74,29 +68,30 @@ function locateCompiledPlugin() {
   return null;
 }
 
-function isPluginInstalled() {
-  const target = path.join(userSettings.gameDir, PLUGIN_FILENAME);
-  return fs.existsSync(target);
-}
-
-// 100% silent injection with zero popups or file dialogs
 function silentlyInjectPlugin() {
   const targetPlugin = path.join(userSettings.gameDir, PLUGIN_FILENAME);
-  if (fs.existsSync(targetPlugin)) return true;
+  if (fs.existsSync(targetPlugin)) return { success: true, path: targetPlugin };
 
-  const src = locateCompiledPlugin();
-  if (src && fs.existsSync(src)) {
+  if (!fs.existsSync(userSettings.gameDir)) {
+    try { fs.mkdirSync(userSettings.gameDir, { recursive: true }); } catch (_) {}
+  }
+
+  const localSrc = locateLocalPlugin();
+  if (localSrc && fs.existsSync(localSrc)) {
     try {
-      if (!fs.existsSync(userSettings.gameDir)) {
-        fs.mkdirSync(userSettings.gameDir, { recursive: true });
+      fs.copyFileSync(localSrc, targetPlugin);
+      if (fs.existsSync(targetPlugin)) {
+        return { success: true, path: targetPlugin };
       }
-      fs.copyFileSync(src, targetPlugin);
-      return fs.existsSync(targetPlugin);
-    } catch (e) {
-      return false;
+    } catch (err) {
+      return { success: false, error: err.message };
     }
   }
-  return false;
+
+  return {
+    success: false,
+    error: "convoygate_plugin.dll not found in application files. Run the latest ConvoyGate Setup installer."
+  };
 }
 
 let userSettings = {
@@ -236,10 +231,10 @@ async function auditSubscriberStatusAndEnforce() {
   const session = loadSession();
   silentlyInjectPlugin();
 
-  const hasPlugin = isPluginInstalled();
+  const pluginFile = path.join(userSettings.gameDir, PLUGIN_FILENAME);
   const trackedMods = loadManagedMods();
 
-  if (trackedMods.length > 0 && !hasPlugin) {
+  if (trackedMods.length > 0 && !fs.existsSync(pluginFile)) {
     purgeAllManagedMods("convoygate_plugin.dll missing from game plugins directory. All managed mods removed.");
     return false;
   }
@@ -567,15 +562,8 @@ ipcMain.handle("audit-plugin", () => {
   return { valid: exists, path: pluginFile, gameDir: userSettings.gameDir };
 });
 
-// Re-injects silently without ANY dialog or popup
 ipcMain.handle("reinstall-plugin", () => {
-  const targetPath = path.join(userSettings.gameDir, PLUGIN_FILENAME);
-  if (fs.existsSync(targetPath)) {
-    return { success: true, path: targetPath };
-  }
-
-  const ok = silentlyInjectPlugin();
-  return { success: ok || fs.existsSync(targetPath), path: targetPath };
+  return silentlyInjectPlugin();
 });
 
 ipcMain.handle("dialog-browse-dir", async (event, type) => {

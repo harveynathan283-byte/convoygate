@@ -16,12 +16,8 @@
     },
     "extraFiles": [
       {
-        "from": "../plugin",
-        "to": ".",
-        "filter": [
-          "**/convoygate_plugin.dll",
-          "convoygate_plugin.dll"
-        ]
+        "from": "convoygate_plugin.dll",
+        "to": "convoygate_plugin.dll"
       }
     ],
     "win": {
