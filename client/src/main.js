@@ -116,7 +116,8 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "index.html"));
 
-  mainWindow.on("close", (event) => {
+ mainWindow.on("close", (event) => {
+    // If user clicked X and app isn't explicitly quitting, minimize to tray
     if (!isQuitting && userSettings.backgroundSync) {
       event.preventDefault();
       mainWindow.hide();
@@ -126,7 +127,14 @@ function createWindow() {
           body: "ConvoyGate is running in the system tray to keep your mods updated."
         }).show();
       }
+      return false;
     }
+  });
+
+  // Force close when Windows installer or system shutdown sends termination signals
+  app.on("session-end", () => {
+    isQuitting = true;
+    app.exit(0);
   });
 }
 

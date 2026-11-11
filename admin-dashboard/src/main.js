@@ -114,7 +114,7 @@ ipcMain.handle("discord-admin-login", async () => {
         adminSessionToken = urlObj.searchParams.get("token");
         const username = urlObj.searchParams.get("username");
         const sessionData = { token: adminSessionToken, user: { username } };
-        
+
         saveAdminSession(sessionData);
         authWin.close();
         resolve({ success: true, ...sessionData });
@@ -135,16 +135,13 @@ function encryptPayload(buffer) {
   }
 }
 
-// Deep EOCD scanning with format pre-flight checks
+// Adaptive Archive Processor
 function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
   const headerFd = fs.openSync(inputPath, "r");
   const magicBuf = Buffer.alloc(8);
   fs.readSync(headerFd, magicBuf, 0, 8, 0);
   fs.closeSync(headerFd);
 
-  if (magicBuf.subarray(0, 4).toString("ascii") === "SCS#") {
-    throw new Error("This mod is already encrypted by its author using SCS HashFS. ConvoyGate can only process standard mods or folders.");
-  }
   if (magicBuf.subarray(0, 6).toString("hex") === "377abcaf271c") {
     throw new Error("This file is a 7-Zip (.7z) archive renamed to .scs. Extract it with 7-Zip and use 'Browse Folder' to publish.");
   }
@@ -152,6 +149,14 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
     throw new Error("This file is a WinRAR (.rar) archive renamed to .scs. Extract it and use 'Browse Folder' to publish.");
   }
 
+  // Pre-locked SCS HashFS (Pass-through delivery)
+  if (magicBuf.subarray(0, 4).toString("ascii") === "SCS#") {
+    if (onProgress) onProgress("Detected SCS HashFS pre-locked mod. Preparing for delivery...");
+    fs.copyFileSync(inputPath, outputPath);
+    return;
+  }
+
+  // Standard ZIP/SCS Processing
   fs.copyFileSync(inputPath, outputPath);
 
   const fd = fs.openSync(outputPath, "r+");
@@ -172,7 +177,7 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
 
   if (eocdOffsetInBuf === -1) {
     fs.closeSync(fd);
-    throw new Error("Invalid archive: missing ZIP directory (EOCD). The file may be corrupted, a renamed RAR/7z, or an incomplete download.");
+    throw new Error("Invalid archive: missing ZIP directory (EOCD). The file may be an incomplete download.");
   }
 
   const cdSize = searchBuf.readUInt32LE(eocdOffsetInBuf + 12);
@@ -180,7 +185,7 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
 
   if (cdOffset + cdSize > fileSize) {
     fs.closeSync(fd);
-    throw new Error("Archive central directory exceeds file size. The file may be incomplete or corrupted.");
+    throw new Error("Archive central directory exceeds file size. The file may be corrupted.");
   }
 
   const cdBuf = Buffer.alloc(cdSize);
@@ -241,6 +246,7 @@ function encryptAndLockScsArchive(inputPath, outputPath, onProgress) {
 
 function getAllFiles(dir, base = "") {
   let results = [];
+  if (!fs.existsSync(dir)) return results;
   const list = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of list) {
     const full = path.join(dir, entry.name);
@@ -273,6 +279,12 @@ function extractArchiveToDir(archivePath, targetDir) {
 
   const fd = fs.openSync(archivePath, "r");
   try {
+    const magicBuf = Buffer.alloc(4);
+    fs.readSync(fd, magicBuf, 0, 4, 0);
+    if (magicBuf.toString("ascii") === "SCS#") {
+      throw new Error(`'${path.basename(archivePath)}' is an SCS HashFS package and cannot be extracted into a Mega Pack. Publish it as a Single Mod.`);
+    }
+
     const stat = fs.fstatSync(fd);
     const fileSize = stat.size;
     const searchLen = Math.min(fileSize, 2 * 1024 * 1024);
@@ -573,7 +585,7 @@ ipcMain.handle("browse-file", async () => {
 
 ipcMain.handle("browse-multiple-files", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select Multiple Mod Files for Mega Pack",
+    title: "Select Multiple Mod Files",
     filters: [{ name: "Mod Archives (*.scs, *.zip)", extensions: ["scs", "zip"] }],
     properties: ["openFile", "multiSelections"],
   });
@@ -581,6 +593,7 @@ ipcMain.handle("browse-multiple-files", async () => {
   return result.filePaths;
 });
 
+// Single and Mega Pack Adaptive Publisher
 ipcMain.handle("publish-package-adaptive", async (event, payload) => {
   let tmpFinalScs = null;
 
@@ -605,9 +618,13 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
       tmpFinalScs = path.join(os.tmpdir(), `${modId}_${uniqueSuffix}_locked.scs`);
 
       if (stat.isFile()) {
-        sendStatus("Encrypting 3D assets & obfuscating headers...", 0);
-        encryptAndLockScsArchive(filePath, tmpFinalScs, (count) => {
-          sendStatus(`Secured ${count} assets...`);
+        sendStatus("Auditing format & packaging assets...", 0);
+        encryptAndLockScsArchive(filePath, tmpFinalScs, (msg) => {
+          if (typeof msg === "number") {
+            sendStatus(`Secured ${msg} assets...`);
+          } else {
+            sendStatus(msg);
+          }
         });
       } else {
         sendStatus("Compiling folder into encrypted SCS archive...", 0);
@@ -616,7 +633,7 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
         });
       }
 
-      sendStatus("Streaming locked mod to Sydney VPS...", 0);
+      sendStatus("Streaming package to Sydney VPS...", 0);
       const result = await streamUploadToBackend(
         tmpFinalScs,
         {
@@ -636,29 +653,37 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
     } else {
       const megaPackId = payload.megaPackId;
       const megaPackName = payload.megaPackName;
-      const packWorkingDir = path.join(MEGAPACKS_DIR, megaPackId);
+      const packBaseDir = path.join(MEGAPACKS_DIR, megaPackId);
+      const sourcesDir = path.join(packBaseDir, "sources");
+      const assembledDir = path.join(packBaseDir, "assembled");
 
-      if (!fs.existsSync(packWorkingDir)) {
-        fs.mkdirSync(packWorkingDir, { recursive: true });
-      }
+      fs.mkdirSync(sourcesDir, { recursive: true });
+      fs.mkdirSync(assembledDir, { recursive: true });
 
       const registry = loadRegistry();
       let packEntry = registry.find(p => p.id === megaPackId);
       if (!packEntry) {
-        packEntry = { id: megaPackId, name: megaPackName, files: [] };
+        packEntry = { id: megaPackId, name: megaPackName, files: [], version, tier };
         registry.push(packEntry);
+      } else {
+        packEntry.name = megaPackName;
+        packEntry.version = version;
+        packEntry.tier = tier;
       }
 
+      // 1. Copy source files into the Mega Pack's sources directory
       for (let i = 0; i < filePaths.length; i++) {
         const itemPath = filePaths[i];
         const baseName = path.basename(itemPath);
-        sendStatus(`Merging [${i + 1}/${filePaths.length}]: ${baseName}...`, Math.round((i / filePaths.length) * 50));
+        sendStatus(`Staging [${i + 1}/${filePaths.length}]: ${baseName}...`, Math.round((i / filePaths.length) * 30));
 
+        const targetSource = path.join(sourcesDir, baseName);
         const stat = fs.statSync(itemPath);
+
         if (stat.isDirectory()) {
-          copyFolderRecursive(itemPath, packWorkingDir);
+          copyFolderRecursive(itemPath, targetSource);
         } else {
-          extractArchiveToDir(itemPath, packWorkingDir);
+          fs.copyFileSync(itemPath, targetSource);
         }
 
         if (!packEntry.files.includes(baseName)) {
@@ -668,12 +693,30 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
 
       saveRegistry(registry);
 
-      sendStatus("Generating master ATS Mega Pack manifest...", 60);
-      updateMegaPackManifest(packWorkingDir, megaPackName, version, packEntry.files);
+      // 2. Re-assemble working directory from all staged source packages
+      fs.rmSync(assembledDir, { recursive: true, force: true });
+      fs.mkdirSync(assembledDir, { recursive: true });
+
+      for (let i = 0; i < packEntry.files.length; i++) {
+        const fileName = packEntry.files[i];
+        const srcPath = path.join(sourcesDir, fileName);
+        if (!fs.existsSync(srcPath)) continue;
+
+        sendStatus(`Extracting: ${fileName}...`, 30 + Math.round((i / packEntry.files.length) * 30));
+        const stat = fs.statSync(srcPath);
+        if (stat.isDirectory()) {
+          copyFolderRecursive(srcPath, assembledDir);
+        } else {
+          extractArchiveToDir(srcPath, assembledDir);
+        }
+      }
+
+      sendStatus("Generating master ATS Mega Pack manifest...", 65);
+      updateMegaPackManifest(assembledDir, megaPackName, version, packEntry.files);
 
       tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_${uniqueSuffix}_megapack_locked.scs`);
       sendStatus("Encrypting combined Mega Pack assets...", 70);
-      packFolderEncrypted(packWorkingDir, tmpFinalScs, (curr, total) => {
+      packFolderEncrypted(assembledDir, tmpFinalScs, (curr, total) => {
         sendStatus(`Encrypting Mega Pack: ${curr}/${total} files...`);
       });
 
@@ -699,9 +742,98 @@ ipcMain.handle("publish-package-adaptive", async (event, payload) => {
     return { success: false, error: err.message };
   } finally {
     if (tmpFinalScs && fs.existsSync(tmpFinalScs)) {
-      try {
-        fs.unlinkSync(tmpFinalScs);
-      } catch (e) {}
+      try { fs.unlinkSync(tmpFinalScs); } catch (e) {}
+    }
+  }
+});
+
+// Remove an individual mod from inside a Mega Pack and re-publish seamlessly
+ipcMain.handle("remove-megapack-item", async (event, { megaPackId, fileName }) => {
+  let tmpFinalScs = null;
+  const sendStatus = (message, percent) => {
+    event.sender.send("publish-status", { message, percent });
+  };
+
+  try {
+    const registry = loadRegistry();
+    const packEntry = registry.find(p => p.id === megaPackId);
+    if (!packEntry) throw new Error("Mega Pack not found in local registry.");
+
+    const packBaseDir = path.join(MEGAPACKS_DIR, megaPackId);
+    const sourcesDir = path.join(packBaseDir, "sources");
+    const assembledDir = path.join(packBaseDir, "assembled");
+
+    const targetSource = path.join(sourcesDir, fileName);
+    if (fs.existsSync(targetSource)) {
+      fs.rmSync(targetSource, { recursive: true, force: true });
+    }
+
+    packEntry.files = packEntry.files.filter(f => f !== fileName);
+    saveRegistry(registry);
+
+    // If no mods remain in this Mega Pack, delete the Mega Pack entirely
+    if (packEntry.files.length === 0) {
+      sendStatus("Mega Pack is empty. Removing from cloud catalog...", 50);
+      const headers = {};
+      if (adminSessionToken) headers["Authorization"] = `Bearer ${adminSessionToken}`;
+      else headers["x-admin-key"] = "cg_admin_local_fallback";
+
+      await axios.delete(`${SERVER_URL}/api/v1/admin/mods/${encodeURIComponent(megaPackId)}`, { headers, timeout: 8000 });
+      fs.rmSync(packBaseDir, { recursive: true, force: true });
+      saveRegistry(registry.filter(p => p.id !== megaPackId));
+
+      return { success: true, deletedPack: true };
+    }
+
+    // Re-assemble the Mega Pack without the removed mod
+    sendStatus(`Rebuilding ${packEntry.name} without ${fileName}...`, 20);
+    fs.rmSync(assembledDir, { recursive: true, force: true });
+    fs.mkdirSync(assembledDir, { recursive: true });
+
+    for (let i = 0; i < packEntry.files.length; i++) {
+      const remainingFile = packEntry.files[i];
+      const srcPath = path.join(sourcesDir, remainingFile);
+      if (!fs.existsSync(srcPath)) continue;
+
+      const stat = fs.statSync(srcPath);
+      if (stat.isDirectory()) {
+        copyFolderRecursive(srcPath, assembledDir);
+      } else {
+        extractArchiveToDir(srcPath, assembledDir);
+      }
+    }
+
+    sendStatus("Regenerating manifest...", 50);
+    updateMegaPackManifest(assembledDir, packEntry.name, packEntry.version || "1.0.0", packEntry.files);
+
+    const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+    tmpFinalScs = path.join(os.tmpdir(), `${megaPackId}_${uniqueSuffix}_megapack_locked.scs`);
+
+    sendStatus("Encrypting updated Mega Pack...", 65);
+    packFolderEncrypted(assembledDir, tmpFinalScs);
+
+    sendStatus("Syncing updated Mega Pack to Sydney VPS...", 85);
+    const result = await streamUploadToBackend(
+      tmpFinalScs,
+      {
+        "x-mod-id": encodeURIComponent(megaPackId),
+        "x-mod-name": encodeURIComponent(packEntry.name),
+        "x-mod-version": encodeURIComponent(packEntry.version || "1.0.0"),
+        "x-mod-tier": encodeURIComponent(packEntry.tier || "All"),
+      },
+      (sent, total) => {
+        const pct = Math.round((sent / total) * 100);
+        sendStatus(`Uploading updated pack: ${pct}%`, pct);
+      }
+    );
+
+    return { success: true, deletedPack: false, remainingFiles: packEntry.files };
+
+  } catch (err) {
+    return { success: false, error: err.message };
+  } finally {
+    if (tmpFinalScs && fs.existsSync(tmpFinalScs)) {
+      try { fs.unlinkSync(tmpFinalScs); } catch (e) {}
     }
   }
 });
@@ -729,9 +861,9 @@ ipcMain.handle("delete-mod", async (event, modId) => {
       timeout: 8000,
     });
 
-    const packWorkingDir = path.join(MEGAPACKS_DIR, modId);
-    if (fs.existsSync(packWorkingDir)) {
-      fs.rmSync(packWorkingDir, { recursive: true, force: true });
+    const packBaseDir = path.join(MEGAPACKS_DIR, modId);
+    if (fs.existsSync(packBaseDir)) {
+      fs.rmSync(packBaseDir, { recursive: true, force: true });
     }
     const registry = loadRegistry().filter(p => p.id !== modId);
     saveRegistry(registry);

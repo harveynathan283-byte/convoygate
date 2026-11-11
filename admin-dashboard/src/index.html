@@ -28,7 +28,6 @@
       padding: 0;
     }
 
-    /* Scrollbars */
     ::-webkit-scrollbar {
       width: 8px;
       height: 8px;
@@ -55,7 +54,6 @@
       user-select: none;
     }
 
-    /* Scrollable Container */
     .admin-viewport {
       flex: 1;
       overflow-y: auto;
@@ -66,7 +64,6 @@
       gap: 20px;
     }
 
-    /* Persistent Discord Admin Overlay */
     .login-overlay {
       position: fixed;
       top: 0;
@@ -267,7 +264,6 @@
       border-color: #0284c7;
       color: #fff;
     }
-
     .btn-primary:hover {
       background: #0369a1;
     }
@@ -277,7 +273,6 @@
       border-color: var(--accent-purple);
       color: #fff;
     }
-
     .btn-purple:hover {
       background: var(--accent-purple-hover);
     }
@@ -286,10 +281,9 @@
       background: rgba(239, 68, 68, 0.15);
       color: var(--danger);
       border: 1px solid rgba(239, 68, 68, 0.3);
-      padding: 4px 10px;
-      font-size: 0.75rem;
+      padding: 5px 12px;
+      font-size: 0.76rem;
     }
-
     .btn-danger:hover {
       background: rgba(239, 68, 68, 0.3);
     }
@@ -302,27 +296,9 @@
       font-weight: 600;
       flex-shrink: 0;
     }
-
-    .alert-banner.error {
-      display: block;
-      background: rgba(239, 68, 68, 0.12);
-      border: 1px solid rgba(239, 68, 68, 0.4);
-      color: var(--danger);
-    }
-
-    .alert-banner.success {
-      display: block;
-      background: rgba(16, 185, 129, 0.12);
-      border: 1px solid rgba(16, 185, 129, 0.4);
-      color: var(--success);
-    }
-
-    .alert-banner.info {
-      display: block;
-      background: rgba(2, 132, 199, 0.15);
-      border: 1px solid rgba(2, 132, 199, 0.4);
-      color: var(--accent-cyan);
-    }
+    .alert-banner.error { display: block; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); color: var(--danger); }
+    .alert-banner.success { display: block; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.4); color: var(--success); }
+    .alert-banner.info { display: block; background: rgba(2, 132, 199, 0.15); border: 1px solid rgba(2, 132, 199, 0.4); color: var(--accent-cyan); }
 
     .catalog-section {
       display: flex;
@@ -368,6 +344,13 @@
       border-bottom: none;
     }
 
+    .table-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Modal Styling */
     .modal-overlay {
       display: none;
       position: fixed;
@@ -387,7 +370,7 @@
       background: var(--bg-surface);
       border: 1px solid var(--border-color);
       border-radius: 12px;
-      width: 520px;
+      width: 540px;
       max-width: 95vw;
       max-height: 90vh;
       overflow-y: auto;
@@ -410,15 +393,15 @@
       margin-top: 4px;
     }
 
-    .modal-batch-notice {
+    .queue-badge {
       display: none;
-      background: rgba(245, 158, 11, 0.12);
-      border: 1px solid rgba(245, 158, 11, 0.35);
-      color: var(--warning);
-      padding: 10px 14px;
+      background: rgba(0, 162, 255, 0.12);
+      border: 1px solid rgba(0, 162, 255, 0.35);
+      color: var(--accent-cyan);
+      padding: 8px 14px;
       border-radius: 6px;
-      font-size: 0.8rem;
-      font-weight: 600;
+      font-size: 0.82rem;
+      font-weight: 700;
     }
 
     .form-group {
@@ -483,6 +466,39 @@
       gap: 10px;
       margin-top: 8px;
     }
+
+    /* Sub-Mod Manager List Items */
+    .submod-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+      background: #080e1a;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    .submod-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #0d1629;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 0.85rem;
+    }
+
+    .submod-name {
+      font-family: monospace;
+      color: #38bdf8;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-right: 12px;
+    }
   </style>
 </head>
 <body>
@@ -525,7 +541,7 @@
       <div class="btn-group">
         <button class="btn" onclick="browseFolder()">📁 Browse Folder</button>
         <button class="btn" onclick="browseSingleFile()">📦 Browse Single .SCS / .ZIP</button>
-        <button class="btn btn-purple" onclick="browseMultipleFiles()">📚 Browse Multiple Files (Mega Pack)</button>
+        <button class="btn btn-purple" onclick="browseMultipleFiles()">📚 Browse Multiple Files</button>
       </div>
       <button class="btn btn-primary" onclick="loadCatalog()">🔄 Refresh Catalog</button>
     </div>
@@ -556,7 +572,7 @@
     </section>
   </div>
 
-  <!-- Adaptive Modal -->
+  <!-- Adaptive Publish Modal (Queue & MegaPack) -->
   <div class="modal-overlay" id="publishModal">
     <div class="modal-card">
       <div class="modal-header">
@@ -564,20 +580,20 @@
         <p id="modalSubTitle">Configure mod parameters before streaming to VPS</p>
       </div>
 
-      <div class="modal-batch-notice" id="batchNotice">
-        ⚠️ Multiple files selected. Single mod mode disabled — Mega Pack packaging enforced.
+      <div class="queue-badge" id="queueBadge">
+        Queue Mode: Mod 1 of 3
       </div>
 
-      <div class="form-group">
+      <div class="form-group" id="selectedFilesGroup">
         <label>Selected Item(s)</label>
         <div class="selected-files-box" id="modalFileList"></div>
       </div>
 
-      <div class="form-group">
-        <label>Package Type</label>
+      <div class="form-group" id="packageTypeGroup">
+        <label>Packaging Mode</label>
         <select id="selectPackageType" onchange="onPackageTypeChange()">
-          <option value="single">Single Standalone Mod</option>
-          <option value="megapack">Mega Pack (Merged Archive)</option>
+          <option value="single_queue">Batch Single Mods (Publish Each Individually)</option>
+          <option value="megapack">Mega Pack (Merge into 1 Combined Archive)</option>
         </select>
       </div>
 
@@ -597,7 +613,7 @@
       </div>
 
       <div class="form-group" id="singleNameGroup">
-        <label>Display Name</label>
+        <label id="lblDisplayName">Display Name</label>
         <input type="text" id="inputDisplayName" placeholder="Mod Display Name">
       </div>
 
@@ -624,6 +640,24 @@
     </div>
   </div>
 
+  <!-- Mega Pack Sub-Mod Inspector & Remover Modal -->
+  <div class="modal-overlay" id="megaPackManageModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="managePackTitle">Manage Mega Pack</h3>
+        <p>Remove individual packages from this Mega Pack without deleting the entire pack.</p>
+      </div>
+
+      <div class="submod-list" id="subModListContainer">
+        <!-- Rendered Dynamically -->
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-primary" onclick="closeManageModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const { ipcRenderer } = require("electron");
 
@@ -638,16 +672,25 @@
     const adminLoginError = document.getElementById("adminLoginError");
 
     const publishModal = document.getElementById("publishModal");
-    const batchNotice = document.getElementById("batchNotice");
+    const queueBadge = document.getElementById("queueBadge");
     const selectPackageType = document.getElementById("selectPackageType");
+    const packageTypeGroup = document.getElementById("packageTypeGroup");
+    const selectedFilesGroup = document.getElementById("selectedFilesGroup");
     const megaPackSection = document.getElementById("megaPackSection");
     const selectMegaPackTarget = document.getElementById("selectMegaPackTarget");
     const newMegaPackInputGroup = document.getElementById("newMegaPackInputGroup");
     const singleNameGroup = document.getElementById("singleNameGroup");
     const modalFileList = document.getElementById("modalFileList");
+    const btnConfirmPublish = document.getElementById("btnConfirmPublish");
+
+    const megaPackManageModal = document.getElementById("megaPackManageModal");
+    const managePackTitle = document.getElementById("managePackTitle");
+    const subModListContainer = document.getElementById("subModListContainer");
 
     let queuedFiles = [];
+    let currentQueueIndex = 0;
     let knownMegaPacks = [];
+    let activeManagePackId = null;
 
     async function initAdmin() {
       const stored = await ipcRenderer.invoke("get-stored-admin-session");
@@ -723,27 +766,65 @@
 
     async function openPublishModal(paths) {
       queuedFiles = paths;
-      modalFileList.innerHTML = paths.map(p => `<div>• ${p.split(/[\\/]/).pop()}</div>`).join("");
-
+      currentQueueIndex = 0;
       knownMegaPacks = await ipcRenderer.invoke("get-megapacks");
       populateMegaPackSelect();
 
-      const isMulti = paths.length > 1;
-      if (isMulti) {
-        batchNotice.style.display = "block";
-        selectPackageType.value = "megapack";
-        selectPackageType.disabled = true;
-      } else {
-        batchNotice.style.display = "none";
-        selectPackageType.disabled = false;
-        selectPackageType.value = "single";
+      modalFileList.innerHTML = paths.map(p => `<div>• ${p.split(/[\\/]/).pop()}</div>`).join("");
 
-        const baseName = paths[0].split(/[\\/]/).pop().replace(/\.(scs|zip)$/i, "");
-        document.getElementById("inputDisplayName").value = baseName.replace(/[_-]/g, " ");
+      if (paths.length > 1) {
+        packageTypeGroup.style.display = "flex";
+        selectPackageType.value = "single_queue";
+      } else {
+        packageTypeGroup.style.display = "none";
+        selectPackageType.value = "single_queue";
       }
 
-      onPackageTypeChange();
+      setupQueueStep();
       publishModal.style.display = "flex";
+    }
+
+    function setupQueueStep() {
+      const isMega = selectPackageType.value === "megapack";
+      const isQueue = !isMega && queuedFiles.length > 1;
+
+      if (isMega) {
+        queueBadge.style.display = "none";
+        selectedFilesGroup.style.display = "flex";
+        megaPackSection.style.display = "flex";
+        singleNameGroup.style.display = "none";
+        btnConfirmPublish.innerText = "Merge & Publish Mega Pack";
+        onMegaPackTargetChange();
+      } else if (isQueue) {
+        queueBadge.style.display = "block";
+        queueBadge.innerText = `Queue Step: Mod ${currentQueueIndex + 1} of ${queuedFiles.length}`;
+        selectedFilesGroup.style.display = "none";
+        megaPackSection.style.display = "none";
+        singleNameGroup.style.display = "flex";
+
+        const currentFilePath = queuedFiles[currentQueueIndex];
+        const baseName = currentFilePath.split(/[\\/]/).pop().replace(/\.(scs|zip)$/i, "");
+        document.getElementById("inputDisplayName").value = baseName.replace(/[_-]/g, " ");
+        document.getElementById("lblDisplayName").innerText = `Display Name (${currentQueueIndex + 1}/${queuedFiles.length}: ${pathBase(currentFilePath)})`;
+
+        const isLast = currentQueueIndex === queuedFiles.length - 1;
+        btnConfirmPublish.innerText = isLast ? "Publish Final Mod" : `Publish & Next (${currentQueueIndex + 1}/${queuedFiles.length})`;
+      } else {
+        // Single dropped item
+        queueBadge.style.display = "none";
+        selectedFilesGroup.style.display = "flex";
+        megaPackSection.style.display = "none";
+        singleNameGroup.style.display = "flex";
+
+        const baseName = queuedFiles[0].split(/[\\/]/).pop().replace(/\.(scs|zip)$/i, "");
+        document.getElementById("inputDisplayName").value = baseName.replace(/[_-]/g, " ");
+        document.getElementById("lblDisplayName").innerText = "Display Name";
+        btnConfirmPublish.innerText = "Encrypt & Publish to VPS";
+      }
+    }
+
+    function pathBase(p) {
+      return p.split(/[\\/]/).pop();
     }
 
     function populateMegaPackSelect() {
@@ -757,11 +838,7 @@
     }
 
     function onPackageTypeChange() {
-      const isMega = selectPackageType.value === "megapack";
-      megaPackSection.style.display = isMega ? "flex" : "none";
-      singleNameGroup.style.display = isMega ? "none" : "flex";
-
-      if (isMega) onMegaPackTargetChange();
+      setupQueueStep();
     }
 
     function onMegaPackTargetChange() {
@@ -772,6 +849,7 @@
     function closeModal() {
       publishModal.style.display = "none";
       queuedFiles = [];
+      currentQueueIndex = 0;
     }
 
     async function submitPublish() {
@@ -779,53 +857,92 @@
       const version = document.getElementById("inputVersion").value || "1.0.0";
       const tier = document.getElementById("selectTier").value || "All";
 
-      let payload = {
-        isMegaPack: isMega,
-        filePaths: queuedFiles,
-        version,
-        tier
-      };
-
       if (isMega) {
+        let megaPackName = "";
+        let megaPackId = "";
         const isNew = selectMegaPackTarget.value === "__new__";
+
         if (isNew) {
-          const packName = document.getElementById("inputNewMegaPackName").value.trim();
-          if (!packName) {
+          megaPackName = document.getElementById("inputNewMegaPackName").value.trim();
+          if (!megaPackName) {
             alert("Please provide a name for the new Mega Pack.");
             return;
           }
-          payload.megaPackName = packName;
-          payload.megaPackId = packName.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+          megaPackId = megaPackName.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
         } else {
-          const selectedId = selectMegaPackTarget.value;
-          const selectedObj = knownMegaPacks.find(p => p.id === selectedId);
-          payload.megaPackId = selectedId;
-          payload.megaPackName = selectedObj ? selectedObj.name : selectedId;
+          megaPackId = selectMegaPackTarget.value;
+          const found = knownMegaPacks.find(p => p.id === megaPackId);
+          megaPackName = found ? found.name : megaPackId;
         }
+
+        closeModal();
+        showAlert("Assembling, encrypting, and uploading Mega Pack...", "info");
+
+        const res = await ipcRenderer.invoke("publish-package-adaptive", {
+          isMegaPack: true,
+          filePaths: queuedFiles,
+          megaPackId,
+          megaPackName,
+          version,
+          tier
+        });
+
+        if (res && res.success) {
+          showAlert(`Successfully published Mega Pack: ${megaPackName}`, "success");
+          await loadCatalog();
+        } else {
+          showAlert(`Failed to publish: ${res ? res.error : "Unknown error"}`, "error");
+        }
+
       } else {
+        // Single Mod Queue Item
+        const currentFile = queuedFiles[currentQueueIndex];
         const name = document.getElementById("inputDisplayName").value.trim();
         if (!name) {
-          alert("Please provide a display name.");
+          alert("Please enter a display name for this mod.");
           return;
         }
-        payload.name = name;
-        payload.modId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
-      }
 
-      closeModal();
-      showAlert("Preparing, encrypting, and uploading package...", "info");
+        const modId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
 
-      const res = await ipcRenderer.invoke("publish-package-adaptive", payload);
-      if (res && res.success) {
-        showAlert(`Successfully published: ${res.name || payload.megaPackName || payload.name}`, "success");
-        await loadCatalog();
-      } else {
-        showAlert(`Failed to publish: ${res ? res.error : "Unknown error"}`, "error");
+        btnConfirmPublish.disabled = true;
+        btnConfirmPublish.innerText = "Publishing...";
+        showAlert(`Publishing [${currentQueueIndex + 1}/${queuedFiles.length}]: ${name}...`, "info");
+
+        const res = await ipcRenderer.invoke("publish-package-adaptive", {
+          isMegaPack: false,
+          filePaths: [currentFile],
+          name,
+          modId,
+          version,
+          tier
+        });
+
+        btnConfirmPublish.disabled = false;
+
+        if (res && res.success) {
+          showAlert(`Published ${name} successfully!`, "success");
+          currentQueueIndex++;
+
+          if (currentQueueIndex < queuedFiles.length) {
+            // Move to next mod in batch queue
+            setupQueueStep();
+          } else {
+            // Queue complete
+            closeModal();
+            showAlert("All batch mods successfully published!", "success");
+            await loadCatalog();
+          }
+        } else {
+          showAlert(`Failed to publish ${name}: ${res ? res.error : "Unknown error"}`, "error");
+        }
       }
     }
 
     async function loadCatalog() {
       const res = await ipcRenderer.invoke("fetch-catalog");
+      knownMegaPacks = await ipcRenderer.invoke("get-megapacks");
+
       if (res && res.success) {
         backendStatus.className = "status-badge status-online";
         backendStatus.innerText = "Online (Sydney VPS)";
@@ -835,20 +952,82 @@
           return;
         }
 
-        catalogTableBody.innerHTML = res.mods.map(mod => `
-          <tr>
-            <td style="font-family: monospace; color: #38bdf8;">${mod.id}</td>
-            <td style="font-weight: 600;">${mod.name}</td>
-            <td>v${mod.version}</td>
-            <td><span style="background: rgba(147, 51, 234, 0.2); color: #c084fc; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem;">${mod.tier}</span></td>
-            <td>${(mod.file_size / 1024 / 1024).toFixed(2)} MB</td>
-            <td><button class="btn btn-danger" onclick="deleteMod('${mod.id}')">Delete</button></td>
-          </tr>
-        `).join("");
+        catalogTableBody.innerHTML = res.mods.map(mod => {
+          const pack = knownMegaPacks.find(p => p.id === mod.id);
+          const isMega = !!pack || mod.id.includes("megapack") || mod.name.toLowerCase().includes("mega pack");
+
+          return `
+            <tr>
+              <td style="font-family: monospace; color: #38bdf8;">${mod.id}</td>
+              <td style="font-weight: 600;">${mod.name}</td>
+              <td>v${mod.version}</td>
+              <td><span style="background: rgba(147, 51, 234, 0.2); color: #c084fc; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem;">${mod.tier}</span></td>
+              <td>${(mod.file_size / 1024 / 1024).toFixed(2)} MB</td>
+              <td>
+                <div class="table-actions">
+                  ${isMega ? `<button class="btn btn-purple" style="padding: 4px 10px; font-size: 0.75rem;" onclick="openMegaPackManager('${mod.id}', '${escape(mod.name)}')">📦 Manage Sub-Mods</button>` : ''}
+                  <button class="btn btn-danger" onclick="deleteMod('${mod.id}')">Delete</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join("");
       } else {
         backendStatus.className = "status-badge status-offline";
         backendStatus.innerText = "Offline (Backend Unreachable)";
         catalogTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 24px; color: var(--danger);">Unable to reach backend server.</td></tr>`;
+      }
+    }
+
+    // Sub-Mod Management: Inspect and remove mods inside Mega Packs
+    function openMegaPackManager(megaPackId, unescapedName) {
+      activeManagePackId = megaPackId;
+      const packName = unescape(unescapedName);
+      managePackTitle.innerText = `Manage Mega Pack: ${packName}`;
+
+      const pack = knownMegaPacks.find(p => p.id === megaPackId);
+      renderSubModsList(pack ? pack.files : []);
+      megaPackManageModal.style.display = "flex";
+    }
+
+    function closeManageModal() {
+      megaPackManageModal.style.display = "none";
+      activeManagePackId = null;
+    }
+
+    function renderSubModsList(files) {
+      if (!files || files.length === 0) {
+        subModListContainer.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 20px;">No individual sub-mods tracked in this pack.</div>`;
+        return;
+      }
+
+      subModListContainer.innerHTML = files.map(file => `
+        <div class="submod-item">
+          <span class="submod-name" title="${file}">• ${file}</span>
+          <button class="btn btn-danger" onclick="removeSubMod('${activeManagePackId}', '${file}')">Remove From Pack</button>
+        </div>
+      `).join("");
+    }
+
+    async function removeSubMod(megaPackId, fileName) {
+      if (!confirm(`Are you sure you want to remove '${fileName}' from this Mega Pack? The Mega Pack will be re-encrypted and re-uploaded automatically.`)) {
+        return;
+      }
+
+      showAlert(`Rebuilding Mega Pack without ${fileName}...`, "info");
+      const res = await ipcRenderer.invoke("remove-megapack-item", { megaPackId, fileName });
+
+      if (res && res.success) {
+        if (res.deletedPack) {
+          showAlert(`All mods removed. Mega Pack deleted cleanly.`, "success");
+          closeManageModal();
+        } else {
+          showAlert(`Successfully removed ${fileName}! Mega Pack re-synced.`, "success");
+          renderSubModsList(res.remainingFiles);
+        }
+        await loadCatalog();
+      } else {
+        showAlert(`Failed to remove mod: ${res ? res.error : "Unknown error"}`, "error");
       }
     }
 
