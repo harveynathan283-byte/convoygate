@@ -10,7 +10,9 @@ let tray = null;
 let isQuitting = false;
 let syncInterval = null;
 let watchdogInterval = null;
+let isSyncing = false;
 
+const PLUGIN_FILENAME = "convoygate_plugin.dll";
 const SERVER_URL = "https://api.convoygate.com";
 const SESSION_FILE = path.join(app.getPath("userData"), "session.json");
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
@@ -25,13 +27,51 @@ function getDefaultModDir() {
   return atsMod;
 }
 
-function getDefaultGameDir() {
+function autoDetectGameDir() {
+  const drives = ["C:", "D:", "E:", "F:", "G:"];
+  const subPaths = [
+    "Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "Program Files\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "SteamLibrary\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins",
+    "Games\\SteamLibrary\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins"
+  ];
+
+  for (const drive of drives) {
+    for (const sub of subPaths) {
+      const candidatePlugins = path.join(drive, "\\", sub);
+      const binDir = path.dirname(candidatePlugins);
+      if (fs.existsSync(binDir)) {
+        return candidatePlugins;
+      }
+    }
+  }
   return "C:\\Program Files (x86)\\Steam\\steamapps\\common\\American Truck Simulator\\bin\\win_x64\\plugins";
+}
+
+// Scans your existing project folders for the compiled convoygate_plugin.dll
+function locateCompiledPlugin() {
+  const root = path.join(__dirname, "../..");
+  const searchLocations = [
+    path.join(root, "plugin", PLUGIN_FILENAME),
+    path.join(root, "plugin", "build", PLUGIN_FILENAME),
+    path.join(root, "plugin", "build", "Release", PLUGIN_FILENAME),
+    path.join(root, "plugin", "build", "Debug", PLUGIN_FILENAME),
+    path.join(root, "plugin", "Release", PLUGIN_FILENAME),
+    path.join(root, "plugin", "bin", PLUGIN_FILENAME),
+    path.join(process.resourcesPath, PLUGIN_FILENAME),
+    path.join(process.resourcesPath, "assets", PLUGIN_FILENAME)
+  ];
+
+  for (const loc of searchLocations) {
+    if (fs.existsSync(loc)) return loc;
+  }
+  return null;
 }
 
 let userSettings = {
   modDir: getDefaultModDir(),
-  gameDir: getDefaultGameDir(),
+  gameDir: autoDetectGameDir(),
   startOnBoot: true,
   backgroundSync: true,
   autoUpdate: true,
@@ -45,10 +85,22 @@ function loadSettings() {
       userSettings = { ...userSettings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) };
     }
   } catch (e) {}
+
+  const binDir = path.dirname(userSettings.gameDir);
+  if (!fs.existsSync(binDir)) {
+    const detected = autoDetectGameDir();
+    if (fs.existsSync(path.dirname(detected))) {
+      userSettings.gameDir = detected;
+    }
+  }
+
   if (!fs.existsSync(userSettings.modDir)) fs.mkdirSync(userSettings.modDir, { recursive: true });
 }
 
 function saveSettings(newSettings) {
+  const wasAutoInstall = userSettings.autoInstall;
+  const wasAutoUpdate = userSettings.autoUpdate;
+
   userSettings = { ...userSettings, ...newSettings };
   try {
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2), "utf8");
@@ -58,6 +110,10 @@ function saveSettings(newSettings) {
     openAtLogin: userSettings.startOnBoot !== false,
     openAsHidden: true,
   });
+
+  if ((!wasAutoInstall && userSettings.autoInstall) || (!wasAutoUpdate && userSettings.autoUpdate)) {
+    runSilentBackgroundUpdate(true);
+  }
 }
 
 function loadSession() {
@@ -146,24 +202,38 @@ function purgeAllManagedMods(reason) {
   }
 }
 
-// Active Watchdog: Audits Discord role, lease validity, and DLL presence
+function attemptAutoInjectPlugin() {
+  const targetPlugin = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  if (!fs.existsSync(targetPlugin)) {
+    const src = locateCompiledPlugin();
+    if (src && fs.existsSync(src)) {
+      try {
+        fs.mkdirSync(userSettings.gameDir, { recursive: true });
+        fs.copyFileSync(src, targetPlugin);
+      } catch (e) {}
+    }
+  }
+}
+
 async function auditSubscriberStatusAndEnforce() {
   const session = loadSession();
-  const pluginFile = path.join(userSettings.gameDir, "convoygate.dll");
+  attemptAutoInjectPlugin();
 
-  // Rule 1: User deleted or uninstalled convoygate.dll
-  if (!fs.existsSync(pluginFile)) {
-    purgeAllManagedMods("convoygate.dll was deleted from the game plugins directory. All managed mods removed.");
+  const pluginFile = path.join(userSettings.gameDir, PLUGIN_FILENAME);
+  const trackedMods = loadManagedMods();
+
+  if (trackedMods.length > 0 && !fs.existsSync(pluginFile)) {
+    purgeAllManagedMods("convoygate_plugin.dll is missing from your game plugins directory. All managed mods removed.");
     return false;
   }
 
-  // Rule 2: No active session
   if (!session || !session.token) {
-    purgeAllManagedMods("No active Discord login found. All managed mods removed.");
+    if (trackedMods.length > 0) {
+      purgeAllManagedMods("No active Discord login found. All managed mods removed.");
+    }
     return false;
   }
 
-  // Rule 3: Active Discord role validation with VPS
   try {
     const res = await axios.post(
       `${SERVER_URL}/api/v1/license/lease`,
@@ -190,15 +260,17 @@ async function auditSubscriberStatusAndEnforce() {
   }
 }
 
-// Background sync & cloud catalog pruning
 async function runSilentBackgroundUpdate(notifyUser = false) {
-  const isAuthorized = await auditSubscriberStatusAndEnforce();
-  if (!isAuthorized) return;
-
-  const session = loadSession();
-  if (!session || !session.token) return;
+  if (isSyncing) return;
+  isSyncing = true;
 
   try {
+    const isAuthorized = await auditSubscriberStatusAndEnforce();
+    if (!isAuthorized) return;
+
+    const session = loadSession();
+    if (!session || !session.token) return;
+
     const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
     if (!res.data || !res.data.success) return;
 
@@ -207,76 +279,102 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
     const destDir = userSettings.modDir;
     const trackedMods = loadManagedMods();
 
-    // Rule 4: If a mod is removed by admin from publisher, delete it on client system
     for (const localModId of trackedMods) {
       if (!remoteModIds.has(localModId)) {
         const localFile = path.join(destDir, `${localModId}.scs`);
         if (fs.existsSync(localFile)) {
-          try {
-            fs.unlinkSync(localFile);
-          } catch (e) {}
+          try { fs.unlinkSync(localFile); } catch (e) {}
         }
         removeManagedModRecord(localModId);
       }
     }
 
-    let updatedCount = 0;
+    const queue = [];
     for (const mod of remoteMods) {
       const localFile = path.join(destDir, `${mod.id}.scs`);
-      let needsDownload = false;
+      const targetSize = Number(mod.file_size || mod.size || 0);
 
       if (!fs.existsSync(localFile)) {
-        if (userSettings.autoInstall) needsDownload = true;
+        if (userSettings.autoInstall) {
+          queue.push({ mod, reason: "install" });
+        }
       } else {
         const stat = fs.statSync(localFile);
-        if (userSettings.autoUpdate && stat.size !== mod.file_size) {
-          needsDownload = true;
-        }
-      }
-
-      if (needsDownload) {
-        const tempFile = path.join(destDir, `${mod.id}.scs.download`);
-        try {
-          const downloadRes = await axios({
-            method: "GET",
-            url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(mod.id)}?token=${session.token}`,
-            responseType: "stream",
-            timeout: 600000,
-          });
-
-          const writer = fs.createWriteStream(tempFile);
-          await new Promise((resolve, reject) => {
-            downloadRes.data.pipe(writer);
-            writer.on("finish", resolve);
-            writer.on("error", reject);
-          });
-
-          if (fs.existsSync(localFile)) fs.unlinkSync(localFile);
-          fs.renameSync(tempFile, localFile);
-          recordManagedMod(mod.id);
-          updatedCount++;
-        } catch (e) {
-          if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+        if (userSettings.autoUpdate && targetSize > 0 && stat.size !== targetSize) {
+          queue.push({ mod, reason: "update" });
         }
       }
     }
 
-    if (updatedCount > 0 && Notification.isSupported()) {
+    if (queue.length === 0) {
+      if (notifyUser && Notification.isSupported()) {
+        new Notification({ title: "ConvoyGate", body: "All mods are up to date." }).show();
+      }
+      return;
+    }
+
+    let processed = 0;
+    for (const item of queue) {
+      const { mod, reason } = item;
+      const targetFile = path.join(destDir, `${mod.id}.scs`);
+      const tempFile = path.join(destDir, `${mod.id}.scs.download`);
+
+      const actionText = reason === "update" ? "Updating" : "Auto-installing";
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("queue-progress", {
+          message: `[${processed + 1}/${queue.length}] ${actionText} ${mod.name}...`,
+          percent: Math.round((processed / queue.length) * 100)
+        });
+      }
+
+      try {
+        const downloadRes = await axios({
+          method: "GET",
+          url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(mod.id)}?token=${session.token}`,
+          responseType: "stream",
+          timeout: 600000,
+        });
+
+        const writer = fs.createWriteStream(tempFile);
+        await new Promise((resolve, reject) => {
+          downloadRes.data.pipe(writer);
+          writer.on("finish", resolve);
+          writer.on("error", reject);
+        });
+
+        if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
+        fs.renameSync(tempFile, targetFile);
+        recordManagedMod(mod.id);
+        processed++;
+      } catch (e) {
+        if (fs.existsSync(tempFile)) {
+          try { fs.unlinkSync(tempFile); } catch (_) {}
+        }
+      }
+    }
+
+    if (processed > 0 && Notification.isSupported()) {
       new Notification({
         title: "ConvoyGate Mods Synchronized",
-        body: `Updated/installed ${updatedCount} mod package(s).`
-      }).show();
-    } else if (notifyUser && Notification.isSupported()) {
-      new Notification({
-        title: "ConvoyGate",
-        body: "All mods are up to date."
+        body: `Successfully installed/updated ${processed} mod package(s).`
       }).show();
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("sync-completed");
+      mainWindow.webContents.send("queue-progress", {
+        message: `Synchronization complete. (${processed} package(s) processed)`,
+        percent: 100
+      });
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("sync-completed");
+        }
+      }, 2500);
     }
-  } catch (err) {}
+  } catch (err) {
+  } finally {
+    isSyncing = false;
+  }
 }
 
 const gotTheLock = app.requestSingleInstanceLock();
@@ -362,6 +460,8 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
 
+  attemptAutoInjectPlugin();
+
   setTimeout(auditSubscriberStatusAndEnforce, 2000);
   watchdogInterval = setInterval(auditSubscriberStatusAndEnforce, 30 * 1000);
 
@@ -371,7 +471,7 @@ app.whenReady().then(() => {
     }
   }, (userSettings.syncIntervalMinutes || 15) * 60 * 1000);
 
-  setTimeout(() => runSilentBackgroundUpdate(false), 5000);
+  setTimeout(() => runSilentBackgroundUpdate(false), 4000);
 });
 
 async function handleDiscordLogin() {
@@ -400,7 +500,9 @@ async function handleDiscordLogin() {
         const sessionData = { token, user: { username } };
         saveSession(sessionData);
         authWin.close();
-        auditSubscriberStatusAndEnforce();
+        auditSubscriberStatusAndEnforce().then(() => {
+          runSilentBackgroundUpdate(false);
+        });
         resolve({ success: true, ...sessionData });
       }
     });
@@ -442,20 +544,48 @@ ipcMain.handle("update-settings", (event, newSettings) => {
   return userSettings;
 });
 
+// Checks for convoygate_plugin.dll
 ipcMain.handle("audit-plugin", () => {
-  const pluginFile = path.join(userSettings.gameDir, "convoygate.dll");
+  const pluginFile = path.join(userSettings.gameDir, PLUGIN_FILENAME);
   const exists = fs.existsSync(pluginFile);
-  return { valid: exists, path: pluginFile };
+  const foundSrc = locateCompiledPlugin();
+  return { valid: exists, path: pluginFile, gameDir: userSettings.gameDir, hasSource: !!foundSrc };
 });
 
-ipcMain.handle("reinstall-plugin", () => {
+// Re-injects convoygate_plugin.dll into ATS
+ipcMain.handle("reinstall-plugin", async () => {
   try {
-    fs.mkdirSync(userSettings.gameDir, { recursive: true });
-    const targetPath = path.join(userSettings.gameDir, "convoygate.dll");
-    const bundledPath = path.join(__dirname, "..", "assets", "convoygate.dll");
-    if (fs.existsSync(bundledPath)) {
-      fs.copyFileSync(bundledPath, targetPath);
+    let sourcePath = locateCompiledPlugin();
+
+    // If not automatically found in project, prompt with a file picker
+    if (!sourcePath || !fs.existsSync(sourcePath)) {
+      const pick = await dialog.showOpenDialog(mainWindow, {
+        title: "Locate convoygate_plugin.dll",
+        filters: [{ name: "Dynamic Link Library (*.dll)", extensions: ["dll"] }],
+        properties: ["openFile"]
+      });
+
+      if (pick.canceled || !pick.filePaths.length) {
+        return {
+          success: false,
+          error: "convoygate_plugin.dll not found. Please compile the plugin or browse to it."
+        };
+      }
+      sourcePath = pick.filePaths[0];
     }
+
+    const targetDir = userSettings.gameDir;
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    const targetPath = path.join(targetDir, PLUGIN_FILENAME);
+    fs.copyFileSync(sourcePath, targetPath);
+
+    if (!fs.existsSync(targetPath)) {
+      return { success: false, error: "Failed to copy convoygate_plugin.dll. Please check permissions." };
+    }
+
     return { success: true, path: targetPath };
   } catch (err) {
     return { success: false, error: err.message };
@@ -490,21 +620,26 @@ ipcMain.handle("fetch-catalog", async () => {
     }
 
     const installed = {};
+    let pendingAutoAction = false;
+
     mods.forEach(mod => {
       const localPath = path.join(userSettings.modDir, `${mod.id}.scs`);
+      const targetSize = Number(mod.file_size || mod.size || 0);
+
       if (fs.existsSync(localPath)) {
         const stat = fs.statSync(localPath);
-        installed[mod.id] = {
-          installed: true,
-          needsUpdate: stat.size !== mod.file_size
-        };
+        const needsUpdate = targetSize > 0 && stat.size !== targetSize;
+        installed[mod.id] = { installed: true, needsUpdate };
+        if (needsUpdate && userSettings.autoUpdate) pendingAutoAction = true;
       } else {
-        installed[mod.id] = {
-          installed: false,
-          needsUpdate: false
-        };
+        installed[mod.id] = { installed: false, needsUpdate: false };
+        if (userSettings.autoInstall) pendingAutoAction = true;
       }
     });
+
+    if (pendingAutoAction) {
+      setTimeout(() => runSilentBackgroundUpdate(false), 500);
+    }
 
     return { success: true, mods, installed };
   } catch (err) {
