@@ -11,6 +11,7 @@
 #include <cctype>
 #include <algorithm>
 #include <unordered_map>
+#include <atomic>
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "crypt32.lib")
@@ -29,6 +30,7 @@ const unsigned char DRM_CIPHER_KEY[16] = {
 
 // Track handles confirmed to be ConvoyGate-encrypted .scs packages
 std::unordered_map<HANDLE, bool> g_ProtectedHandles;
+std::atomic<int> g_ProtectedHandleCount{ 0 };
 CRITICAL_SECTION g_HandleLock;
 
 std::string CleanString(const std::string& input) {
@@ -173,13 +175,9 @@ HANDLE WINAPI HookedCreateFileW(
     DWORD dwFlagsAndAttributes,
     HANDLE hTemplateFile
 ) {
-    HANDLE hFile = g_OriginalCreateFileW(
-        lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
-        dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile
-    );
-    DWORD lastErr = GetLastError();
+    bool isEncryptedMod = false;
 
-    if (hFile != INVALID_HANDLE_VALUE && lpFileName != NULL) {
+    if (lpFileName != NULL && (dwDesiredAccess & (GENERIC_READ | FILE_READ_DATA))) {
         std::wstring ws(lpFileName);
         std::transform(ws.begin(), ws.end(), ws.begin(), ::towlower);
         std::replace(ws.begin(), ws.end(), L'/', L'\\');
@@ -187,7 +185,6 @@ HANDLE WINAPI HookedCreateFileW(
         if ((ws.find(L"\\mod\\") != std::wstring::npos || ws.rfind(L"mod\\", 0) == 0) &&
             ws.find(L".scs") != std::wstring::npos) {
 
-            // Pre-screen file header using an independent handle to prevent corrupting regular mods
             HANDLE hCheck = g_OriginalCreateFileW(lpFileName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hCheck != INVALID_HANDLE_VALUE) {
                 unsigned char magic[4] = { 0 };
@@ -196,11 +193,10 @@ HANDLE WINAPI HookedCreateFileW(
                     // 0x13 0x25 0x6F 0x71 (Encrypted PK\x03\x04) or 0x10 0x2D 0x3F 0x56 (Encrypted SCS#)
                     bool isEncryptedZip = (magic[0] == 0x13 && magic[1] == 0x25 && magic[2] == 0x6F && magic[3] == 0x71);
                     bool isEncryptedScs = (magic[0] == 0x10 && magic[1] == 0x2D && magic[2] == 0x3F && magic[3] == 0x56);
-
                     if (isEncryptedZip || isEncryptedScs) {
-                        EnterCriticalSection(&g_HandleLock);
-                        g_ProtectedHandles[hFile] = true;
-                        LeaveCriticalSection(&g_HandleLock);
+                        isEncryptedMod = true;
+                        // Ensure encrypted mod reads complete synchronously without blocking IOCP
+                        dwFlagsAndAttributes &= ~FILE_FLAG_OVERLAPPED;
                     }
                 }
                 g_OriginalCloseHandle(hCheck);
@@ -208,7 +204,20 @@ HANDLE WINAPI HookedCreateFileW(
         }
     }
 
-    SetLastError(lastErr);
+    HANDLE hFile = g_OriginalCreateFileW(
+        lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
+        dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile
+    );
+
+    if (isEncryptedMod && hFile != INVALID_HANDLE_VALUE) {
+        DWORD lastErr = GetLastError();
+        EnterCriticalSection(&g_HandleLock);
+        g_ProtectedHandles[hFile] = true;
+        g_ProtectedHandleCount.fetch_add(1, std::memory_order_relaxed);
+        LeaveCriticalSection(&g_HandleLock);
+        SetLastError(lastErr);
+    }
+
     return hFile;
 }
 
@@ -219,6 +228,23 @@ BOOL WINAPI HookedReadFile(
     LPDWORD lpNumberOfBytesRead,
     LPOVERLAPPED lpOverlapped
 ) {
+    // Fast-path: pass all non-protected files, pipes, and base.scs directly through untouched
+    if (g_ProtectedHandleCount.load(std::memory_order_relaxed) == 0) {
+        return g_OriginalReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
+    }
+
+    bool isProtected = false;
+    EnterCriticalSection(&g_HandleLock);
+    auto it = g_ProtectedHandles.find(hFile);
+    if (it != g_ProtectedHandles.end() && it->second) {
+        isProtected = true;
+    }
+    LeaveCriticalSection(&g_HandleLock);
+
+    if (!isProtected) {
+        return g_OriginalReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
+    }
+
     LARGE_INTEGER offsetBefore = { 0 };
     if (lpOverlapped == NULL) {
         LARGE_INTEGER zero = { 0 };
@@ -228,17 +254,14 @@ BOOL WINAPI HookedReadFile(
         offsetBefore.HighPart = lpOverlapped->OffsetHigh;
     }
 
-    BOOL result = g_OriginalReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
+    DWORD localBytesRead = 0;
+    LPDWORD pBytesRead = (lpNumberOfBytesRead != NULL) ? lpNumberOfBytesRead : &localBytesRead;
+
+    BOOL result = g_OriginalReadFile(hFile, lpBuffer, nNumberOfBytesToRead, pBytesRead, lpOverlapped);
     DWORD lastErr = GetLastError();
 
-    DWORD bytesRead = 0;
-    if (result) {
-        if (lpNumberOfBytesRead != NULL) {
-            bytesRead = *lpNumberOfBytesRead;
-        } else if (lpOverlapped != NULL) {
-            GetOverlappedResult(hFile, lpOverlapped, &bytesRead, FALSE);
-        }
-    } else if (lastErr == ERROR_IO_PENDING && lpOverlapped != NULL) {
+    DWORD bytesRead = *pBytesRead;
+    if (!result && lastErr == ERROR_IO_PENDING && lpOverlapped != NULL) {
         if (GetOverlappedResult(hFile, lpOverlapped, &bytesRead, TRUE)) {
             result = TRUE;
             lastErr = ERROR_SUCCESS;
@@ -248,23 +271,13 @@ BOOL WINAPI HookedReadFile(
         }
     }
 
-    if (result && lpBuffer != NULL && bytesRead > 0) {
-        bool isProtected = false;
-        EnterCriticalSection(&g_HandleLock);
-        auto it = g_ProtectedHandles.find(hFile);
-        if (it != g_ProtectedHandles.end() && it->second) {
-            isProtected = true;
-        }
-        LeaveCriticalSection(&g_HandleLock);
+    if (result && lpBuffer != NULL && bytesRead > 0 && g_bLeaseValid) {
+        unsigned char* buf = reinterpret_cast<unsigned char*>(lpBuffer);
+        long long startPos = offsetBefore.QuadPart;
 
-        if (isProtected && g_bLeaseValid) {
-            unsigned char* buf = reinterpret_cast<unsigned char*>(lpBuffer);
-            long long startPos = offsetBefore.QuadPart;
-
-            for (DWORD i = 0; i < bytesRead; i++) {
-                long long absPos = startPos + i;
-                buf[i] ^= DRM_CIPHER_KEY[absPos % sizeof(DRM_CIPHER_KEY)] ^ (absPos & 0xFF);
-            }
+        for (DWORD i = 0; i < bytesRead; i++) {
+            long long absPos = startPos + i;
+            buf[i] ^= DRM_CIPHER_KEY[absPos % sizeof(DRM_CIPHER_KEY)] ^ (absPos & 0xFF);
         }
     }
 
@@ -273,10 +286,13 @@ BOOL WINAPI HookedReadFile(
 }
 
 BOOL WINAPI HookedCloseHandle(HANDLE hObject) {
-    if (hObject != NULL && hObject != INVALID_HANDLE_VALUE) {
+    if (g_ProtectedHandleCount.load(std::memory_order_relaxed) > 0 &&
+        hObject != NULL && hObject != INVALID_HANDLE_VALUE) {
         EnterCriticalSection(&g_HandleLock);
-        if (!g_ProtectedHandles.empty()) {
-            g_ProtectedHandles.erase(hObject);
+        auto it = g_ProtectedHandles.find(hObject);
+        if (it != g_ProtectedHandles.end()) {
+            g_ProtectedHandles.erase(it);
+            g_ProtectedHandleCount.fetch_sub(1, std::memory_order_relaxed);
         }
         LeaveCriticalSection(&g_HandleLock);
     }
