@@ -78,7 +78,7 @@ jobs:
 
           # Clean up older releases (keep newest 3)
           $oldReleases = gh release list --limit 20 --json tagName -q ".[3:][].tagName"
-          foreach ($old in$oldReleases) {
+          foreach ($old in $oldReleases) {
             if ($old) {
               gh release delete $old --yes --cleanup-tag 2>$null
             }
