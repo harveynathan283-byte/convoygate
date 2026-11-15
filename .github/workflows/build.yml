@@ -7,6 +7,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -54,16 +57,16 @@ jobs:
         run: |
           Compress-Archive -Path "client/dist/*Setup*.exe" -DestinationPath "dist_zip/ConvoyGate-Client-Setup.zip"
 
-      # 5. UPLOAD ADMIN ARTIFACT
-      - name: Upload Admin Setup Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: ConvoyGate-Admin-Installer
-          path: dist_zip/ConvoyGate-Admin-Setup.zip
-
-      # 6. UPLOAD CLIENT ARTIFACT
-      - name: Upload Client Setup Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: ConvoyGate-Client-Installer
-          path: dist_zip/ConvoyGate-Client-Setup.zip
+      # 5. PUBLISH TO GITHUB RELEASES (Bypasses 500MB Actions storage quota)
+      - name: Publish Release Installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          gh release view latest 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload latest dist_zip/ConvoyGate-Admin-Setup.zip dist_zip/ConvoyGate-Client-Setup.zip --clobber
+          } else {
+            $global:LASTEXITCODE = 0
+            gh release create latest dist_zip/ConvoyGate-Admin-Setup.zip dist_zip/ConvoyGate-Client-Setup.zip --title "ConvoyGate Latest Installers" --notes "Automated CI Build" --prerelease
+          }
