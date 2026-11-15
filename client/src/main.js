@@ -285,12 +285,16 @@ function clearSession() {
 
 function loadManagedMods() {
   try {
-    if (fs.existsSync(MANAGED_MODS_FILE)) return JSON.parse(fs.readFileSync(MANAGED_MODS_FILE, "utf8"));
+    if (fs.existsSync(MANAGED_MODS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(MANAGED_MODS_FILE, "utf8"));
+      return Array.isArray(parsed) ? parsed : [];
+    }
   } catch (e) {}
   return [];
 }
 
 function recordManagedMod(modId) {
+  if (!modId) return;
   const list = loadManagedMods();
   if (!list.includes(modId)) {
     list.push(modId);
@@ -314,20 +318,66 @@ function getHWID() {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
+// Checks the 4-byte ConvoyGate DRM header so third-party/personal mods are never touched
+function isConvoyGateEncryptedFile(filePath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const magic = Buffer.alloc(4);
+    const bytesRead = fs.readSync(fd, magic, 0, 4, 0);
+    if (bytesRead < 4) return false;
+
+    const isEncryptedZip = (magic[0] === 0x13 && magic[1] === 0x25 && magic[2] === 0x6F && magic[3] === 0x71);
+    const isEncryptedScs = (magic[0] === 0x10 && magic[1] === 0x2D && magic[2] === 0x3F && magic[3] === 0x56);
+    return isEncryptedZip || isEncryptedScs;
+  } catch (_) {
+    return false;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  }
+}
+
+// Removes ONLY ConvoyGate-tracked or ConvoyGate-encrypted .scs files, leaving all user/third-party mods intact
 function purgeAllManagedMods(reason) {
-  const trackedMods = loadManagedMods();
+  const trackedMods = new Set(loadManagedMods());
   const destDir = userSettings.modDir;
   let purgedCount = 0;
 
-  trackedMods.forEach((modId) => {
-    const filePath = path.join(destDir, `${modId}.scs`);
-    if (fs.existsSync(filePath)) {
-      try {
-        fs.unlinkSync(filePath);
-        purgedCount++;
-      } catch (e) {}
+  if (fs.existsSync(destDir)) {
+    // 1. Delete every mod ID explicitly tracked in managed_mods.json
+    for (const modId of trackedMods) {
+      const filePath = path.join(destDir, `${modId}.scs`);
+      if (fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+          purgedCount++;
+        } catch (e) {}
+      }
     }
-  });
+
+    // 2. Also remove any ConvoyGate-encrypted .scs or leftover ConvoyGate temp files in the mod folder
+    try {
+      const entries = fs.readdirSync(destDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const fullPath = path.join(destDir, entry.name);
+
+        if (entry.name.endsWith(".scs") && isConvoyGateEncryptedFile(fullPath)) {
+          try {
+            fs.unlinkSync(fullPath);
+            purgedCount++;
+          } catch (e) {}
+        } else if (entry.name.includes(".scs.download")) {
+          const baseId = entry.name.split(".scs.download")[0];
+          if (trackedMods.has(baseId) || isConvoyGateEncryptedFile(fullPath)) {
+            safeRemoveFile(fullPath);
+          }
+        }
+      }
+    } catch (_) {}
+  }
 
   try {
     fs.writeFileSync(MANAGED_MODS_FILE, JSON.stringify([], null, 2), "utf8");
@@ -341,7 +391,7 @@ function purgeAllManagedMods(reason) {
   if (purgedCount > 0 && Notification.isSupported()) {
     new Notification({
       title: "ConvoyGate Security Action",
-      body: reason || "Subscription role or core plugin removed. Managed mods uninstalled."
+      body: reason || "Subscription role or core plugin removed. ConvoyGate mods uninstalled."
     }).show();
   }
 
@@ -358,21 +408,42 @@ function revokeAccessAndLogout(reason) {
   }
 }
 
+function hasAnyConvoyGateModsInstalled() {
+  const trackedMods = loadManagedMods();
+  if (trackedMods.length > 0) return true;
+
+  const destDir = userSettings.modDir;
+  if (!fs.existsSync(destDir)) return false;
+
+  try {
+    const entries = fs.readdirSync(destDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".scs")) {
+        if (isConvoyGateEncryptedFile(path.join(destDir, entry.name))) {
+          return true;
+        }
+      }
+    }
+  } catch (_) {}
+
+  return false;
+}
+
 async function auditSubscriberStatusAndEnforce() {
   const session = loadSession();
   await ensurePluginInjected();
 
   const hasPlugin = !!getInstalledPluginPath();
-  const trackedMods = loadManagedMods();
+  const hasConvoyMods = hasAnyConvoyGateModsInstalled();
 
-  if (trackedMods.length > 0 && !hasPlugin) {
-    purgeAllManagedMods("convoygate.dll missing from game plugins directory. All managed mods removed.");
+  if (hasConvoyMods && !hasPlugin) {
+    purgeAllManagedMods("convoygate.dll missing from game plugins directory. ConvoyGate mods removed.");
     return false;
   }
 
   if (!session || !session.token) {
-    if (trackedMods.length > 0) {
-      purgeAllManagedMods("No active Discord login found. All managed mods removed.");
+    if (hasConvoyMods) {
+      purgeAllManagedMods("No active Discord login found. ConvoyGate mods removed.");
     }
     return false;
   }
@@ -391,12 +462,12 @@ async function auditSubscriberStatusAndEnforce() {
       }
       return true;
     } else {
-      revokeAccessAndLogout("Discord subscriber role is no longer active. Mods removed and session logged out.");
+      revokeAccessAndLogout("Discord subscriber role is no longer active. ConvoyGate mods removed and session logged out.");
       return false;
     }
   } catch (err) {
     if (err.response && (err.response.status === 401 || err.response.status === 403)) {
-      revokeAccessAndLogout("Discord subscriber role revoked. Mods removed and session logged out.");
+      revokeAccessAndLogout("Discord subscriber role revoked. ConvoyGate mods removed and session logged out.");
       return false;
     }
     return true;
@@ -495,6 +566,9 @@ async function downloadModWithRetry(mod, token, statusPrefix, basePercent, slice
   const knownSize = Number(mod.file_size || mod.size || 0);
   const maxAttempts = 3;
 
+  // Record ownership before download starts so interrupted files are always tracked as ConvoyGate mods
+  recordManagedMod(mod.id);
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const retryTag = attempt > 1 ? ` [Retry ${attempt - 1}/${maxAttempts - 1}]` : "";
     const initialLabel = knownSize > 0 ? ` (0.0 / ${formatMB(knownSize)} MB)` : "";
@@ -532,6 +606,9 @@ async function downloadModWithRetry(mod, token, statusPrefix, basePercent, slice
     } catch (err) {
       safeRemoveFile(tempFile);
       if (attempt === maxAttempts) {
+        if (!fs.existsSync(targetFile)) {
+          removeManagedModRecord(mod.id);
+        }
         return { success: false, error: err.response?.data?.error || err.message };
       }
       await new Promise((r) => setTimeout(r, 1500));
@@ -575,6 +652,7 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
           queue.push({ mod, reason: "install" });
         }
       } else {
+        recordManagedMod(mod.id);
         const stat = fs.statSync(localFile);
         if (userSettings.autoUpdate && targetSize > 0 && stat.size !== targetSize) {
           queue.push({ mod, reason: "update" });
@@ -864,6 +942,7 @@ ipcMain.handle("fetch-catalog", async () => {
       const targetSize = Number(mod.file_size || mod.size || 0);
 
       if (fs.existsSync(localPath)) {
+        recordManagedMod(mod.id);
         const stat = fs.statSync(localPath);
         const needsUpdate = targetSize > 0 && stat.size !== targetSize;
         installed[mod.id] = { installed: true, needsUpdate };
@@ -980,6 +1059,7 @@ ipcMain.handle("install-all-mods", async (event) => {
       const targetSize = Number(mod.file_size || mod.size || 0);
 
       if (fs.existsSync(localFile) && targetSize > 0 && fs.statSync(localFile).size === targetSize) {
+        recordManagedMod(mod.id);
         processed++;
         continue;
       }
