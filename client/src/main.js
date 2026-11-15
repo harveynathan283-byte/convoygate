@@ -18,6 +18,10 @@ const SESSION_FILE = path.join(app.getPath("userData"), "session.json");
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
 const MANAGED_MODS_FILE = path.join(app.getPath("userData"), "managed_mods.json");
 
+function formatMB(bytes) {
+  return (bytes / (1024 * 1024)).toFixed(1);
+}
+
 function getDefaultModDir() {
   const home = os.homedir();
   const atsMod = path.join(home, "Documents", "American Truck Simulator", "mod");
@@ -76,7 +80,6 @@ function locateLocalPlugin() {
   return null;
 }
 
-// 1. Copies locally if bundled, 2. Auto-downloads from Sydney VPS if missing
 async function ensurePluginInjected() {
   const existing = getInstalledPluginPath();
   if (existing) return { success: true, path: existing };
@@ -85,7 +88,6 @@ async function ensurePluginInjected() {
     try { fs.mkdirSync(userSettings.gameDir, { recursive: true }); } catch (_) {}
   }
 
-  // Check local app folder
   const localSrc = locateLocalPlugin();
   if (localSrc && fs.existsSync(localSrc)) {
     try {
@@ -96,7 +98,6 @@ async function ensurePluginInjected() {
     } catch (_) {}
   }
 
-  // Auto-download directly from VPS
   const downloadEndpoints = [
     `${SERVER_URL}/api/v1/client/download/convoygate.dll`,
     `${SERVER_URL}/api/v1/client/download/convoygate_plugin.dll`,
@@ -259,6 +260,14 @@ function purgeAllManagedMods(reason) {
   }
 }
 
+function revokeAccessAndLogout(reason) {
+  clearSession();
+  purgeAllManagedMods(reason);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("force-logout", reason);
+  }
+}
+
 async function auditSubscriberStatusAndEnforce() {
   const session = loadSession();
   await ensurePluginInjected();
@@ -292,16 +301,49 @@ async function auditSubscriberStatusAndEnforce() {
       }
       return true;
     } else {
-      purgeAllManagedMods("Discord subscriber role is no longer active. Mods de-authorized.");
+      revokeAccessAndLogout("Discord subscriber role is no longer active. Mods removed and session logged out.");
       return false;
     }
   } catch (err) {
     if (err.response && (err.response.status === 401 || err.response.status === 403)) {
-      purgeAllManagedMods("Discord subscriber role revoked. All managed mods deleted.");
+      revokeAccessAndLogout("Discord subscriber role revoked. Mods removed and session logged out.");
       return false;
     }
     return true;
   }
+}
+
+function downloadStreamWithProgress(streamResponse, tempFile, fallbackSize, onProgress) {
+  return new Promise((resolve, reject) => {
+    const headerSize = Number(streamResponse.headers?.["content-length"] || 0);
+    const totalBytes = headerSize > 0 ? headerSize : Number(fallbackSize || 0);
+    let downloadedBytes = 0;
+    let lastEmit = 0;
+
+    const writer = fs.createWriteStream(tempFile);
+
+    streamResponse.data.on("data", (chunk) => {
+      downloadedBytes += chunk.length;
+      const now = Date.now();
+      if (now - lastEmit >= 200) {
+        lastEmit = now;
+        onProgress(downloadedBytes, totalBytes);
+      }
+    });
+
+    streamResponse.data.on("error", (err) => {
+      writer.destroy();
+      reject(err);
+    });
+
+    writer.on("error", reject);
+    writer.on("finish", () => {
+      onProgress(downloadedBytes, totalBytes > 0 ? totalBytes : downloadedBytes);
+      resolve();
+    });
+
+    streamResponse.data.pipe(writer);
+  });
 }
 
 async function runSilentBackgroundUpdate(notifyUser = false) {
@@ -362,11 +404,13 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
       const { mod, reason } = item;
       const targetFile = path.join(destDir, `${mod.id}.scs`);
       const tempFile = path.join(destDir, `${mod.id}.scs.download`);
-
+      const knownSize = Number(mod.file_size || mod.size || 0);
       const actionText = reason === "update" ? "Updating" : "Auto-installing";
+
       if (mainWindow && !mainWindow.isDestroyed()) {
+        const initialLabel = knownSize > 0 ? ` (0.0 / ${formatMB(knownSize)} MB)` : "";
         mainWindow.webContents.send("queue-progress", {
-          message: `[${processed + 1}/${queue.length}] ${actionText} ${mod.name}...`,
+          message: `[${processed + 1}/${queue.length}] ${actionText} ${mod.name}${initialLabel}...`,
           percent: Math.round((processed / queue.length) * 100)
         });
       }
@@ -379,11 +423,19 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
           timeout: 600000,
         });
 
-        const writer = fs.createWriteStream(tempFile);
-        await new Promise((resolve, reject) => {
-          downloadRes.data.pipe(writer);
-          writer.on("finish", resolve);
-          writer.on("error", reject);
+        await downloadStreamWithProgress(downloadRes, tempFile, knownSize, (downloaded, total) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            const sizeLabel = total > 0
+              ? `(${formatMB(downloaded)} / ${formatMB(total)} MB)`
+              : `(${formatMB(downloaded)} MB)`;
+            const fileFraction = total > 0 ? Math.min(1, downloaded / total) : 0;
+            const overallPercent = Math.round(((processed + fileFraction) / queue.length) * 100);
+
+            mainWindow.webContents.send("queue-progress", {
+              message: `[${processed + 1}/${queue.length}] ${actionText} ${mod.name} ${sizeLabel}`,
+              percent: overallPercent
+            });
+          }
         });
 
         if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
@@ -593,7 +645,6 @@ ipcMain.handle("audit-plugin", () => {
   return { valid: !!installed, path: installed || path.join(userSettings.gameDir, "convoygate.dll") };
 });
 
-// Silent re-inject on button press (local or auto-download)
 ipcMain.handle("reinstall-plugin", async () => {
   const res = await ensurePluginInjected();
   return res;
@@ -720,7 +771,7 @@ ipcMain.handle("install-single-mod", async (event, modId) => {
   const tempFile = path.join(userSettings.modDir, `${modId}.scs.download`);
 
   try {
-    event.sender.send("queue-progress", { message: `Requesting stream for ${modId}...`, percent: 20 });
+    event.sender.send("queue-progress", { message: `Requesting stream for ${modId}...`, percent: 5 });
 
     const res = await axios({
       method: "GET",
@@ -729,11 +780,15 @@ ipcMain.handle("install-single-mod", async (event, modId) => {
       timeout: 600000,
     });
 
-    const writer = fs.createWriteStream(tempFile);
-    await new Promise((resolve, reject) => {
-      res.data.pipe(writer);
-      writer.on("finish", resolve);
-      writer.on("error", reject);
+    await downloadStreamWithProgress(res, tempFile, 0, (downloaded, total) => {
+      const sizeLabel = total > 0
+        ? `(${formatMB(downloaded)} / ${formatMB(total)} MB)`
+        : `(${formatMB(downloaded)} MB)`;
+      const pct = total > 0 ? Math.min(99, Math.round((downloaded / total) * 100)) : 50;
+      event.sender.send("queue-progress", {
+        message: `Downloading ${modId} ${sizeLabel}`,
+        percent: pct
+      });
     });
 
     if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
@@ -760,10 +815,12 @@ ipcMain.handle("install-all-mods", async (event) => {
     for (const mod of mods) {
       const targetFile = path.join(userSettings.modDir, `${mod.id}.scs`);
       const tempFile = path.join(userSettings.modDir, `${mod.id}.scs.download`);
+      const knownSize = Number(mod.file_size || mod.size || 0);
       const pct = Math.round((processed / mods.length) * 100);
+      const initialLabel = knownSize > 0 ? ` (0.0 / ${formatMB(knownSize)} MB)` : "";
 
       event.sender.send("queue-progress", {
-        message: `[${processed + 1}/${mods.length}] Downloading ${mod.name}...`,
+        message: `[${processed + 1}/${mods.length}] Downloading ${mod.name}${initialLabel}...`,
         percent: pct
       });
 
@@ -774,11 +831,17 @@ ipcMain.handle("install-all-mods", async (event) => {
         timeout: 600000,
       });
 
-      const writer = fs.createWriteStream(tempFile);
-      await new Promise((resolve, reject) => {
-        downloadRes.data.pipe(writer);
-        writer.on("finish", resolve);
-        writer.on("error", reject);
+      await downloadStreamWithProgress(downloadRes, tempFile, knownSize, (downloaded, total) => {
+        const sizeLabel = total > 0
+          ? `(${formatMB(downloaded)} / ${formatMB(total)} MB)`
+          : `(${formatMB(downloaded)} MB)`;
+        const fileFraction = total > 0 ? Math.min(1, downloaded / total) : 0;
+        const overallPercent = Math.round(((processed + fileFraction) / mods.length) * 100);
+
+        event.sender.send("queue-progress", {
+          message: `[${processed + 1}/${mods.length}] Downloading ${mod.name} ${sizeLabel}`,
+          percent: overallPercent
+        });
       });
 
       if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);

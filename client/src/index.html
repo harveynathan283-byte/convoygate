@@ -752,6 +752,7 @@
       color: var(--accent-cyan);
       font-weight: 600;
       min-width: 240px;
+      max-width: 65%;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -883,7 +884,7 @@
       <div class="settings-pane">
         <div class="settings-card">
           <h3>SCS Telemetry & Anti-Tamper Hook</h3>
-          <p>ConvoyGate requires <code>convoygate_plugin.dll</code> in your ATS x64 plugins folder to mount encrypted mods.</p>
+          <p>ConvoyGate requires <code>convoygate.dll</code> in your ATS x64 plugins folder to mount encrypted mods.</p>
 
           <div class="toggle-row">
             <div class="toggle-info">
@@ -909,7 +910,7 @@
 
         <div class="settings-card">
           <h3>ATS Binaries (Plugins) Directory</h3>
-          <p>Location of <code>American Truck Simulator\bin\win_x64\plugins</code> where <code>convoygate_plugin.dll</code> and <code>convoygate.key</code> reside.</p>
+          <p>Location of <code>American Truck Simulator\bin\win_x64\plugins</code> where <code>convoygate.dll</code> and <code>convoygate.key</code> reside.</p>
           <div class="dir-input-group">
             <input type="text" id="inputGameDir" readonly>
             <button class="btn btn-secondary" onclick="browseDirectory('game')">Change...</button>
@@ -1042,17 +1043,29 @@
       `;
       btn.style.opacity = "1";
       btn.style.pointerEvents = "auto";
-      err.innerText = errorMsg;
-      err.style.display = "block";
+      if (errorMsg) {
+        err.innerText = errorMsg;
+        err.style.display = "block";
+      } else {
+        err.style.display = "none";
+      }
+    }
+
+    function showLoggedOutOverlay(reason) {
+      catalogMods = [];
+      selectedMod = null;
+      localInstalledMap = {};
+      document.getElementById("modCardsContainer").innerHTML = "";
+      document.getElementById("discordTag").innerText = "Awaiting Auth";
+      document.getElementById("avatarImg").innerText = "👤";
+      setFooter("Session ended.", 0);
+      document.getElementById("loginOverlay").style.display = "flex";
+      resetLoginButton(reason || "");
     }
 
     async function logoutDiscord() {
       await ipcRenderer.invoke("logout");
-      document.getElementById("loginOverlay").style.display = "flex";
-      const btn = document.getElementById("btnDiscordLogin");
-      btn.innerText = "Log In with Discord";
-      btn.style.opacity = "1";
-      btn.style.pointerEvents = "auto";
+      showLoggedOutOverlay("");
     }
 
     function switchTab(tabId) {
@@ -1104,7 +1117,7 @@
       setFooter("Verifying ATS anti-tamper plugin hook...", 10);
       const pluginAudit = await ipcRenderer.invoke("audit-plugin");
       if (!pluginAudit.valid) {
-        setFooter("Injecting convoygate_plugin.dll into plugins folder...", 30);
+        setFooter("Injecting convoygate.dll into plugins folder...", 30);
         await ipcRenderer.invoke("reinstall-plugin");
       }
 
@@ -1249,7 +1262,7 @@
 
     async function installSelectedMod() {
       if (!selectedMod) return;
-      setFooter(`Acquiring lease & installing '${selectedMod.name}'...`, 15);
+      setFooter(`Acquiring lease & installing '${selectedMod.name}'...`, 5);
 
       const result = await ipcRenderer.invoke("install-single-mod", selectedMod.id);
       if (result.success) {
@@ -1261,7 +1274,7 @@
     }
 
     async function installAllMods() {
-      setFooter("Queueing batch installation of all catalog packages...", 5);
+      setFooter("Queueing batch installation of all catalog packages...", 2);
       const result = await ipcRenderer.invoke("install-all-mods");
       if (result.success) {
         setFooter("All packages installed and up to date!", 100);
@@ -1318,7 +1331,7 @@
     }
 
     async function reinstallPlugin() {
-      setFooter("Verifying & injecting convoygate_plugin.dll...", 40);
+      setFooter("Verifying & injecting convoygate.dll...", 40);
       const res = await ipcRenderer.invoke("reinstall-plugin");
       if (res && res.success) {
         setFooter("Plugin injected successfully!", 100);
@@ -1341,6 +1354,10 @@
 
     ipcRenderer.on("sync-completed", () => {
       loadCatalog();
+    });
+
+    ipcRenderer.on("force-logout", (event, reason) => {
+      showLoggedOutOverlay(reason);
     });
 
     initApp();
