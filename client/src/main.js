@@ -113,7 +113,7 @@ async function ensurePluginInjected() {
         method: "GET",
         url: `${url}?token=${token}`,
         responseType: "arraybuffer",
-        timeout: 10000
+        timeout: 15000
       });
 
       if (res.status === 200 && res.data && res.data.length > 1000) {
@@ -291,7 +291,7 @@ async function auditSubscriberStatusAndEnforce() {
     const res = await axios.post(
       `${SERVER_URL}/api/v1/license/lease`,
       { hwid: getHWID() },
-      { headers: { Authorization: `Bearer ${session.token}` }, timeout: 6000 }
+      { headers: { Authorization: `Bearer ${session.token}` }, timeout: 8000 }
     );
 
     if (res.data && res.data.success) {
@@ -313,17 +313,50 @@ async function auditSubscriberStatusAndEnforce() {
   }
 }
 
+function safeRemoveFile(filePath) {
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch (_) {}
+}
+
+// Downloads a stream with 25s stall timeout, premature-close detection, and live MB progress
 function downloadStreamWithProgress(streamResponse, tempFile, fallbackSize, onProgress) {
   return new Promise((resolve, reject) => {
     const headerSize = Number(streamResponse.headers?.["content-length"] || 0);
     const totalBytes = headerSize > 0 ? headerSize : Number(fallbackSize || 0);
     let downloadedBytes = 0;
     let lastEmit = 0;
+    let settled = false;
+    let stallTimer = null;
 
     const writer = fs.createWriteStream(tempFile);
 
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      if (stallTimer) clearTimeout(stallTimer);
+      try { streamResponse.data.destroy(); } catch (_) {}
+      try { writer.destroy(); } catch (_) {}
+      setTimeout(() => {
+        safeRemoveFile(tempFile);
+        reject(err);
+      }, 150);
+    };
+
+    const resetStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        fail(new Error("Download stalled (no data received for 25s)"));
+      }, 25000);
+    };
+
+    resetStallTimer();
+
     streamResponse.data.on("data", (chunk) => {
+      if (settled) return;
       downloadedBytes += chunk.length;
+      resetStallTimer();
+
       const now = Date.now();
       if (now - lastEmit >= 200) {
         lastEmit = now;
@@ -331,19 +364,91 @@ function downloadStreamWithProgress(streamResponse, tempFile, fallbackSize, onPr
       }
     });
 
-    streamResponse.data.on("error", (err) => {
-      writer.destroy();
-      reject(err);
+    streamResponse.data.on("aborted", () => {
+      fail(new Error("Server aborted download stream"));
     });
 
-    writer.on("error", reject);
+    streamResponse.data.on("close", () => {
+      if (!settled && !streamResponse.data.complete) {
+        fail(new Error("Connection closed before download finished"));
+      }
+    });
+
+    streamResponse.data.on("error", (err) => {
+      fail(err);
+    });
+
+    writer.on("error", (err) => {
+      fail(err);
+    });
+
     writer.on("finish", () => {
+      if (settled) return;
+      if (stallTimer) clearTimeout(stallTimer);
+
+      if (downloadedBytes === 0 || (headerSize > 0 && downloadedBytes < headerSize)) {
+        fail(new Error(`Incomplete download (${formatMB(downloadedBytes)} / ${formatMB(headerSize)} MB)`));
+        return;
+      }
+
+      settled = true;
       onProgress(downloadedBytes, totalBytes > 0 ? totalBytes : downloadedBytes);
       resolve();
     });
 
     streamResponse.data.pipe(writer);
   });
+}
+
+// Downloads a single mod with automatic retry on stalls/drops
+async function downloadModWithRetry(mod, token, statusPrefix, basePercent, slicePercent, sendProgress) {
+  const targetFile = path.join(userSettings.modDir, `${mod.id}.scs`);
+  const tempFile = path.join(userSettings.modDir, `${mod.id}.scs.download.${Date.now()}`);
+  const knownSize = Number(mod.file_size || mod.size || 0);
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const retryTag = attempt > 1 ? ` [Retry ${attempt - 1}/${maxAttempts - 1}]` : "";
+    const initialLabel = knownSize > 0 ? ` (0.0 / ${formatMB(knownSize)} MB)` : "";
+
+    sendProgress({
+      message: `${statusPrefix} ${mod.name}${retryTag}${initialLabel}...`,
+      percent: Math.round(basePercent)
+    });
+
+    try {
+      const downloadRes = await axios({
+        method: "GET",
+        url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(mod.id)}?token=${token}`,
+        responseType: "stream",
+        timeout: 30000, // 30s to receive HTTP headers; stream stall timer handles transfer
+      });
+
+      await downloadStreamWithProgress(downloadRes, tempFile, knownSize, (downloaded, total) => {
+        const sizeLabel = total > 0
+          ? `(${formatMB(downloaded)} / ${formatMB(total)} MB)`
+          : `(${formatMB(downloaded)} MB)`;
+        const fileFraction = total > 0 ? Math.min(1, downloaded / total) : 0;
+        const overallPercent = Math.min(99, Math.round(basePercent + fileFraction * slicePercent));
+
+        sendProgress({
+          message: `${statusPrefix} ${mod.name}${retryTag} ${sizeLabel}`,
+          percent: overallPercent
+        });
+      });
+
+      safeRemoveFile(targetFile);
+      fs.renameSync(tempFile, targetFile);
+      recordManagedMod(mod.id);
+      return { success: true };
+    } catch (err) {
+      safeRemoveFile(tempFile);
+      if (attempt === maxAttempts) {
+        return { success: false, error: err.response?.data?.error || err.message };
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
 }
 
 async function runSilentBackgroundUpdate(notifyUser = false) {
@@ -357,7 +462,7 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
     const session = loadSession();
     if (!session || !session.token) return;
 
-    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
+    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 10000 });
     if (!res.data || !res.data.success) return;
 
     const remoteMods = res.data.mods || [];
@@ -367,10 +472,7 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
 
     for (const localModId of trackedMods) {
       if (!remoteModIds.has(localModId)) {
-        const localFile = path.join(destDir, `${localModId}.scs`);
-        if (fs.existsSync(localFile)) {
-          try { fs.unlinkSync(localFile); } catch (e) {}
-        }
+        safeRemoveFile(path.join(destDir, `${localModId}.scs`));
         removeManagedModRecord(localModId);
       }
     }
@@ -400,52 +502,25 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
     }
 
     let processed = 0;
-    for (const item of queue) {
-      const { mod, reason } = item;
-      const targetFile = path.join(destDir, `${mod.id}.scs`);
-      const tempFile = path.join(destDir, `${mod.id}.scs.download`);
-      const knownSize = Number(mod.file_size || mod.size || 0);
+    let failed = 0;
+
+    for (let i = 0; i < queue.length; i++) {
+      const { mod, reason } = queue[i];
       const actionText = reason === "update" ? "Updating" : "Auto-installing";
+      const prefix = `[${i + 1}/${queue.length}] ${actionText}`;
+      const basePct = (i / queue.length) * 100;
+      const slicePct = 100 / queue.length;
 
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        const initialLabel = knownSize > 0 ? ` (0.0 / ${formatMB(knownSize)} MB)` : "";
-        mainWindow.webContents.send("queue-progress", {
-          message: `[${processed + 1}/${queue.length}] ${actionText} ${mod.name}${initialLabel}...`,
-          percent: Math.round((processed / queue.length) * 100)
-        });
-      }
-
-      try {
-        const downloadRes = await axios({
-          method: "GET",
-          url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(mod.id)}?token=${session.token}`,
-          responseType: "stream",
-          timeout: 600000,
-        });
-
-        await downloadStreamWithProgress(downloadRes, tempFile, knownSize, (downloaded, total) => {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            const sizeLabel = total > 0
-              ? `(${formatMB(downloaded)} / ${formatMB(total)} MB)`
-              : `(${formatMB(downloaded)} MB)`;
-            const fileFraction = total > 0 ? Math.min(1, downloaded / total) : 0;
-            const overallPercent = Math.round(((processed + fileFraction) / queue.length) * 100);
-
-            mainWindow.webContents.send("queue-progress", {
-              message: `[${processed + 1}/${queue.length}] ${actionText} ${mod.name} ${sizeLabel}`,
-              percent: overallPercent
-            });
-          }
-        });
-
-        if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
-        fs.renameSync(tempFile, targetFile);
-        recordManagedMod(mod.id);
-        processed++;
-      } catch (e) {
-        if (fs.existsSync(tempFile)) {
-          try { fs.unlinkSync(tempFile); } catch (_) {}
+      const result = await downloadModWithRetry(mod, session.token, prefix, basePct, slicePct, (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("queue-progress", payload);
         }
+      });
+
+      if (result.success) {
+        processed++;
+      } else {
+        failed++;
       }
     }
 
@@ -457,10 +532,10 @@ async function runSilentBackgroundUpdate(notifyUser = false) {
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("queue-progress", {
-        message: `Synchronization complete. (${processed} package(s) processed)`,
-        percent: 100
-      });
+      const summary = failed > 0
+        ? `Sync finished: ${processed} installed, ${failed} skipped due to server error.`
+        : `Synchronization complete. (${processed} package(s) processed)`;
+      mainWindow.webContents.send("queue-progress", { message: summary, percent: 100 });
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send("sync-completed");
@@ -661,7 +736,7 @@ ipcMain.handle("dialog-browse-dir", async (event, type) => {
 
 ipcMain.handle("fetch-catalog", async () => {
   try {
-    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
+    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 10000 });
     const mods = res.data?.mods || [];
     const remoteModIds = new Set(mods.map(m => m.id));
     const destDir = userSettings.modDir;
@@ -669,10 +744,7 @@ ipcMain.handle("fetch-catalog", async () => {
 
     for (const localModId of trackedMods) {
       if (!remoteModIds.has(localModId)) {
-        const localFile = path.join(destDir, `${localModId}.scs`);
-        if (fs.existsSync(localFile)) {
-          try { fs.unlinkSync(localFile); } catch (e) {}
-        }
+        safeRemoveFile(path.join(destDir, `${localModId}.scs`));
         removeManagedModRecord(localModId);
       }
     }
@@ -767,99 +839,74 @@ ipcMain.handle("get-single-mod-details", async (event, mod) => {
 ipcMain.handle("install-single-mod", async (event, modId) => {
   const session = loadSession();
   const token = session ? session.token : "";
-  const targetFile = path.join(userSettings.modDir, `${modId}.scs`);
-  const tempFile = path.join(userSettings.modDir, `${modId}.scs.download`);
+  const modObj = { id: modId, name: modId, file_size: 0 };
 
-  try {
-    event.sender.send("queue-progress", { message: `Requesting stream for ${modId}...`, percent: 5 });
+  const res = await downloadModWithRetry(modObj, token, "Downloading", 0, 100, (payload) => {
+    event.sender.send("queue-progress", payload);
+  });
 
-    const res = await axios({
-      method: "GET",
-      url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(modId)}?token=${token}`,
-      responseType: "stream",
-      timeout: 600000,
-    });
-
-    await downloadStreamWithProgress(res, tempFile, 0, (downloaded, total) => {
-      const sizeLabel = total > 0
-        ? `(${formatMB(downloaded)} / ${formatMB(total)} MB)`
-        : `(${formatMB(downloaded)} MB)`;
-      const pct = total > 0 ? Math.min(99, Math.round((downloaded / total) * 100)) : 50;
-      event.sender.send("queue-progress", {
-        message: `Downloading ${modId} ${sizeLabel}`,
-        percent: pct
-      });
-    });
-
-    if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
-    fs.renameSync(tempFile, targetFile);
-    recordManagedMod(modId);
-
+  if (res.success) {
     event.sender.send("queue-progress", { message: `Installed ${modId}.scs`, percent: 100 });
     return { success: true };
-  } catch (err) {
-    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-    return { success: false, error: err.response?.data?.error || err.message };
   }
+  return { success: false, error: res.error };
 });
 
 ipcMain.handle("install-all-mods", async (event) => {
+  if (isSyncing) {
+    return { success: false, error: "Background sync is already downloading mods." };
+  }
+
+  isSyncing = true;
   const session = loadSession();
   const token = session ? session.token : "";
 
   try {
-    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 8000 });
+    const res = await axios.get(`${SERVER_URL}/api/v1/mods`, { timeout: 10000 });
     const mods = res.data?.mods || [];
     let processed = 0;
+    let failed = 0;
 
-    for (const mod of mods) {
-      const targetFile = path.join(userSettings.modDir, `${mod.id}.scs`);
-      const tempFile = path.join(userSettings.modDir, `${mod.id}.scs.download`);
-      const knownSize = Number(mod.file_size || mod.size || 0);
-      const pct = Math.round((processed / mods.length) * 100);
-      const initialLabel = knownSize > 0 ? ` (0.0 / ${formatMB(knownSize)} MB)` : "";
+    for (let i = 0; i < mods.length; i++) {
+      const mod = mods[i];
+      const localFile = path.join(userSettings.modDir, `${mod.id}.scs`);
+      const targetSize = Number(mod.file_size || mod.size || 0);
 
-      event.sender.send("queue-progress", {
-        message: `[${processed + 1}/${mods.length}] Downloading ${mod.name}${initialLabel}...`,
-        percent: pct
+      // Skip already up-to-date mods
+      if (fs.existsSync(localFile) && targetSize > 0 && fs.statSync(localFile).size === targetSize) {
+        processed++;
+        continue;
+      }
+
+      const prefix = `[${i + 1}/${mods.length}] Downloading`;
+      const basePct = (i / mods.length) * 100;
+      const slicePct = 100 / mods.length;
+
+      const dl = await downloadModWithRetry(mod, token, prefix, basePct, slicePct, (payload) => {
+        event.sender.send("queue-progress", payload);
       });
 
-      const downloadRes = await axios({
-        method: "GET",
-        url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(mod.id)}?token=${token}`,
-        responseType: "stream",
-        timeout: 600000,
-      });
-
-      await downloadStreamWithProgress(downloadRes, tempFile, knownSize, (downloaded, total) => {
-        const sizeLabel = total > 0
-          ? `(${formatMB(downloaded)} / ${formatMB(total)} MB)`
-          : `(${formatMB(downloaded)} MB)`;
-        const fileFraction = total > 0 ? Math.min(1, downloaded / total) : 0;
-        const overallPercent = Math.round(((processed + fileFraction) / mods.length) * 100);
-
-        event.sender.send("queue-progress", {
-          message: `[${processed + 1}/${mods.length}] Downloading ${mod.name} ${sizeLabel}`,
-          percent: overallPercent
-        });
-      });
-
-      if (fs.existsSync(targetFile)) fs.unlinkSync(targetFile);
-      fs.renameSync(tempFile, targetFile);
-      recordManagedMod(mod.id);
-      processed++;
+      if (dl.success) {
+        processed++;
+      } else {
+        failed++;
+      }
     }
 
-    event.sender.send("queue-progress", { message: "All mods successfully installed!", percent: 100 });
+    const msg = failed > 0
+      ? `Finished: ${processed} ready, ${failed} skipped (server error).`
+      : "All mods successfully installed!";
+    event.sender.send("queue-progress", { message: msg, percent: 100 });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
+  } finally {
+    isSyncing = false;
   }
 });
 
 ipcMain.handle("uninstall-mod", (event, modId) => {
-  const p = path.join(userSettings.modDir, `${modId}.scs`);
-  if (fs.existsSync(p)) fs.unlinkSync(p);
+  safeRemoveFile(path.join(userSettings.modDir, `${modId}.scs`));
   removeManagedModRecord(modId);
   return { success: true };
 });
