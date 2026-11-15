@@ -343,6 +343,16 @@
       background: var(--accent-cyan-hover);
     }
 
+    .btn-success {
+      background: var(--success);
+      color: #fff;
+      box-shadow: 0 2px 10px rgba(16, 185, 129, 0.35);
+    }
+
+    .btn-success:hover {
+      background: #059669;
+    }
+
     .btn-danger {
       background: rgba(239, 68, 68, 0.15);
       color: var(--danger);
@@ -797,7 +807,7 @@
       <div class="brand-icon">🛡️</div>
       <div class="brand-text">
         <h2>ConvoyGate</h2>
-        <p>Asset Security Suite</p>
+        <p id="appVersionBadge">Asset Security Suite</p>
       </div>
     </div>
 
@@ -833,6 +843,7 @@
       </div>
 
       <div class="top-actions">
+        <button class="btn btn-success" id="btnRestartUpdate" style="display: none;" onclick="installAppUpdate()">🚀 Restart & Update</button>
         <div class="game-badge">
           <div class="game-dot"></div>
           <span>American Truck Simulator</span>
@@ -899,6 +910,18 @@
 
     <section class="view-content" id="viewSettings">
       <div class="settings-pane">
+        <div class="settings-card">
+          <h3>Launcher Auto-Updater</h3>
+          <p>ConvoyGate checks for new client builds automatically and updates in-place without removing your mods.</p>
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <h4>Installed Version</h4>
+              <p id="appUpdateStatusText">Checking version...</p>
+            </div>
+            <button class="btn btn-secondary" onclick="checkForAppUpdates()">Check for Updates</button>
+          </div>
+        </div>
+
         <div class="settings-card">
           <h3>Mod File Directory</h3>
           <p>Location where your <code>.scs</code> mods are placed for ATS to detect them.</p>
@@ -1092,7 +1115,26 @@
       shell.openExternal("https://discord.com");
     }
 
+    function checkForAppUpdates() {
+      document.getElementById("appUpdateStatusText").innerText = "Checking GitHub Releases for updates...";
+      ipcRenderer.invoke("check-app-update");
+    }
+
+    function installAppUpdate() {
+      setFooter("Restarting to install ConvoyGate update...", 100);
+      ipcRenderer.invoke("install-app-update");
+    }
+
     async function initApp() {
+      const appInfo = await ipcRenderer.invoke("get-app-version");
+      if (appInfo && appInfo.version) {
+        document.getElementById("appVersionBadge").innerText = `Asset Security Suite • v${appInfo.version}`;
+        document.getElementById("appUpdateStatusText").innerText = `Current version: v${appInfo.version}`;
+        if (appInfo.updateReady) {
+          document.getElementById("btnRestartUpdate").style.display = "inline-flex";
+        }
+      }
+
       const stored = await ipcRenderer.invoke("get-stored-session");
       if (stored && stored.hasSession && stored.session?.user) {
         document.getElementById("loginOverlay").style.display = "none";
@@ -1358,6 +1400,16 @@
 
     ipcRenderer.on("force-logout", (event, reason) => {
       showLoggedOutOverlay(reason);
+    });
+
+    ipcRenderer.on("app-update-status", (event, data) => {
+      const statusEl = document.getElementById("appUpdateStatusText");
+      if (statusEl && data.message) {
+        statusEl.innerText = data.message;
+      }
+      if (data.state === "ready") {
+        document.getElementById("btnRestartUpdate").style.display = "inline-flex";
+      }
     });
 
     initApp();

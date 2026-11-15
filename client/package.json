@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --win --x64",
-    "build:win": "electron-builder --win --x64"
+    "build:win": "electron-builder --win --x64 --publish never"
   },
   "build": {
     "appId": "com.convoygate.client",
@@ -14,6 +14,13 @@
     "directories": {
       "output": "dist"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "harveynathan283-byte",
+        "repo": "convoygate"
+      }
+    ],
     "extraFiles": [
       {
         "from": ".",
@@ -25,7 +32,8 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "artifactName": "ConvoyGate-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -38,7 +46,8 @@
     }
   },
   "dependencies": {
-    "axios": "^1.6.8"
+    "axios": "^1.6.8",
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^29.1.0",

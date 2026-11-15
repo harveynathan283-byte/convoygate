@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, Notification } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -11,6 +12,7 @@ let isQuitting = false;
 let syncInterval = null;
 let watchdogInterval = null;
 let isSyncing = false;
+let appUpdateReady = false;
 
 const PLUGIN_NAMES = ["convoygate.dll", "convoygate_plugin.dll"];
 const SERVER_URL = "https://api.convoygate.com";
@@ -20,6 +22,94 @@ const MANAGED_MODS_FILE = path.join(app.getPath("userData"), "managed_mods.json"
 
 function formatMB(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+// Configure self-updater
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
+
+function setupAutoUpdater() {
+  autoUpdater.on("checking-for-update", () => {
+    if (mainWindow && !mainWindow.isDestroyed() && !isSyncing) {
+      mainWindow.webContents.send("app-update-status", { state: "checking", message: "Checking for app updates..." });
+    }
+  });
+
+  autoUpdater.on("update-available", (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("app-update-status", {
+        state: "downloading",
+        version: info.version,
+        message: `Downloading ConvoyGate v${info.version}...`
+      });
+      if (!isSyncing) {
+        mainWindow.webContents.send("queue-progress", {
+          message: `Downloading ConvoyGate update v${info.version}...`,
+          percent: 5
+        });
+      }
+    }
+  });
+
+  autoUpdater.on("download-progress", (progressObj) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !isSyncing) {
+      const pct = Math.round(progressObj.percent || 0);
+      const dl = formatMB(progressObj.transferred || 0);
+      const tot = formatMB(progressObj.total || 0);
+      mainWindow.webContents.send("queue-progress", {
+        message: `Downloading ConvoyGate update (${dl} / ${tot} MB)...`,
+        percent: pct
+      });
+    }
+  });
+
+  autoUpdater.on("update-downloaded", (info) => {
+    appUpdateReady = true;
+    if (Notification.isSupported()) {
+      new Notification({
+        title: "ConvoyGate Update Ready",
+        body: `Version v${info.version} downloaded. Click Restart & Update in the launcher to apply.`
+      }).show();
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("app-update-status", {
+        state: "ready",
+        version: info.version,
+        message: `Update v${info.version} ready!`
+      });
+      if (!isSyncing) {
+        mainWindow.webContents.send("queue-progress", {
+          message: `ConvoyGate v${info.version} ready to install! Click "Restart & Update" above.`,
+          percent: 100
+        });
+      }
+    }
+  });
+
+  autoUpdater.on("update-not-available", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("app-update-status", {
+        state: "up-to-date",
+        message: `Up to date (v${app.getVersion()})`
+      });
+    }
+  });
+
+  autoUpdater.on("error", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("app-update-status", {
+        state: "idle",
+        message: `v${app.getVersion()}`
+      });
+    }
+  });
+}
+
+function checkForAppUpdatesSafe() {
+  if (!app.isPackaged) return;
+  try {
+    autoUpdater.checkForUpdates().catch(() => {});
+  } catch (_) {}
 }
 
 function getDefaultModDir() {
@@ -319,7 +409,6 @@ function safeRemoveFile(filePath) {
   } catch (_) {}
 }
 
-// Downloads a stream with 25s stall timeout, premature-close detection, and live MB progress
 function downloadStreamWithProgress(streamResponse, tempFile, fallbackSize, onProgress) {
   return new Promise((resolve, reject) => {
     const headerSize = Number(streamResponse.headers?.["content-length"] || 0);
@@ -400,7 +489,6 @@ function downloadStreamWithProgress(streamResponse, tempFile, fallbackSize, onPr
   });
 }
 
-// Downloads a single mod with automatic retry on stalls/drops
 async function downloadModWithRetry(mod, token, statusPrefix, basePercent, slicePercent, sendProgress) {
   const targetFile = path.join(userSettings.modDir, `${mod.id}.scs`);
   const tempFile = path.join(userSettings.modDir, `${mod.id}.scs.download.${Date.now()}`);
@@ -421,7 +509,7 @@ async function downloadModWithRetry(mod, token, statusPrefix, basePercent, slice
         method: "GET",
         url: `${SERVER_URL}/api/v1/client/download/${encodeURIComponent(mod.id)}?token=${token}`,
         responseType: "stream",
-        timeout: 30000, // 30s to receive HTTP headers; stream stall timer handles transfer
+        timeout: 30000,
       });
 
       await downloadStreamWithProgress(downloadRes, tempFile, knownSize, (downloaded, total) => {
@@ -607,6 +695,10 @@ function createTray() {
       label: "Sync Mods Now",
       click: () => runSilentBackgroundUpdate(true)
     },
+    {
+      label: "Check for App Updates",
+      click: () => checkForAppUpdatesSafe()
+    },
     { type: "separator" },
     {
       label: "Quit Completely",
@@ -628,21 +720,24 @@ function createTray() {
 
 app.whenReady().then(() => {
   loadSettings();
+  setupAutoUpdater();
   createWindow();
   createTray();
 
   ensurePluginInjected();
 
+  setTimeout(checkForAppUpdatesSafe, 3000);
   setTimeout(auditSubscriberStatusAndEnforce, 2000);
   watchdogInterval = setInterval(auditSubscriberStatusAndEnforce, 30 * 1000);
 
   syncInterval = setInterval(() => {
+    checkForAppUpdatesSafe();
     if (userSettings.backgroundSync) {
       runSilentBackgroundUpdate(false);
     }
   }, (userSettings.syncIntervalMinutes || 15) * 60 * 1000);
 
-  setTimeout(() => runSilentBackgroundUpdate(false), 4000);
+  setTimeout(() => runSilentBackgroundUpdate(false), 5000);
 });
 
 async function handleDiscordLogin() {
@@ -703,6 +798,18 @@ ipcMain.handle("logout", () => {
 });
 
 ipcMain.handle("get-hwid", () => getHWID());
+ipcMain.handle("get-app-version", () => ({ version: app.getVersion(), updateReady: appUpdateReady }));
+ipcMain.handle("check-app-update", () => {
+  checkForAppUpdatesSafe();
+  return { checking: true };
+});
+ipcMain.handle("install-app-update", () => {
+  isQuitting = true;
+  setImmediate(() => {
+    autoUpdater.quitAndInstall(false, true);
+  });
+  return { success: true };
+});
 
 ipcMain.handle("load-settings", () => userSettings);
 ipcMain.handle("get-settings", () => userSettings);
@@ -872,7 +979,6 @@ ipcMain.handle("install-all-mods", async (event) => {
       const localFile = path.join(userSettings.modDir, `${mod.id}.scs`);
       const targetSize = Number(mod.file_size || mod.size || 0);
 
-      // Skip already up-to-date mods
       if (fs.existsSync(localFile) && targetSize > 0 && fs.statSync(localFile).size === targetSize) {
         processed++;
         continue;

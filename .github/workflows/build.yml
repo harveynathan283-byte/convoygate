@@ -38,35 +38,48 @@ jobs:
           cmake --build plugin/build --config Release
           Copy-Item plugin/build/Release/*.dll -Destination client/ -Force
 
-      # 3. BUILD CLIENT INSTALLER
+      # 3. BUILD CLIENT INSTALLER WITH AUTO-INCREMENTED VERSION
       - name: Build Client Installer
+        shell: pwsh
         run: |
           cd client
+          $ver = "1.0.$env:GITHUB_RUN_NUMBER"
+          npm version $ver --no-git-tag-version
           npm install
           npm run build:win
 
-      # 4. COMPRESS ARTIFACTS INTO SEPARATE ZIP PACKAGES
-      - name: Package Admin ZIP
+      # 4. COMPRESS ZIP ARTIFACTS FOR MANUAL DOWNLOADS
+      - name: Package ZIPs
         shell: pwsh
         run: |
           mkdir dist_zip
           Compress-Archive -Path "admin-dashboard/dist/*Setup*.exe" -DestinationPath "dist_zip/ConvoyGate-Admin-Setup.zip"
+          Compress-Archive -Path "client/dist/ConvoyGate-Setup-*.exe" -DestinationPath "dist_zip/ConvoyGate-Client-Setup.zip"
 
-      - name: Package Client ZIP
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "client/dist/*Setup*.exe" -DestinationPath "dist_zip/ConvoyGate-Client-Setup.zip"
-
-      # 5. PUBLISH TO GITHUB RELEASES (Bypasses 500MB Actions storage quota)
+      # 5. PUBLISH RELEASE + UPDATER METADATA (latest.yml & blockmap)
       - name: Publish Release Installers
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          gh release view latest 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload latest dist_zip/ConvoyGate-Admin-Setup.zip dist_zip/ConvoyGate-Client-Setup.zip --clobber
-          } else {
-            $global:LASTEXITCODE = 0
-            gh release create latest dist_zip/ConvoyGate-Admin-Setup.zip dist_zip/ConvoyGate-Client-Setup.zip --title "ConvoyGate Latest Installers" --notes "Automated CI Build" --prerelease
+          $tag = "v1.0.$env:GITHUB_RUN_NUMBER"
+          $exe = (Get-ChildItem "client/dist/ConvoyGate-Setup-*.exe" | Select-Object -First 1).FullName
+          $blockmap = (Get-ChildItem "client/dist/ConvoyGate-Setup-*.exe.blockmap" | Select-Object -First 1).FullName
+          $yml = (Get-ChildItem "client/dist/latest.yml" | Select-Object -First 1).FullName
+
+          gh release create $tag `
+            "$exe" `
+            "$blockmap" `
+            "$yml" `
+            "dist_zip/ConvoyGate-Client-Setup.zip" `
+            "dist_zip/ConvoyGate-Admin-Setup.zip" `
+            --title "ConvoyGate $tag" `
+            --notes "Automated build $tag"
+
+          # Clean up older releases (keep newest 3)
+          $oldReleases = gh release list --limit 20 --json tagName -q ".[3:][].tagName"
+          foreach ($old in$oldReleases) {
+            if ($old) {
+              gh release delete $old --yes --cleanup-tag 2>$null
+            }
           }
